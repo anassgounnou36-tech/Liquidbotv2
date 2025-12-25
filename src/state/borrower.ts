@@ -113,7 +113,7 @@ export function determineState(hf: number, hfWatch: number, hfCritical: number, 
 }
 
 // Check if state transition is valid
-export function isValidStateTransition(from: BorrowerState, to: BorrowerState): boolean {
+export function isValidStateTransition(_from: BorrowerState, _to: BorrowerState): boolean {
   // All transitions are valid (including reverse transitions)
   return true;
 }

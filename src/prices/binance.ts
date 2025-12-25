@@ -72,7 +72,7 @@ export class BinancePriceFeed extends EventEmitter {
     
     // Map symbol to asset (e.g., ETHUSDT -> WETH)
     const config = getConfig();
-    let asset: string | undefined;
+    let asset: string = '';
     
     for (const [assetName, binanceSymbol] of config.binanceSymbolMap) {
       if (binanceSymbol.toLowerCase() === symbol.toLowerCase()) {
@@ -85,6 +85,11 @@ export class BinancePriceFeed extends EventEmitter {
       // Try to extract asset from symbol (e.g., ETHUSDT -> ETH)
       asset = symbol.replace('USDT', '').replace('USDC', '').toUpperCase();
       if (asset === 'ETH') asset = 'WETH';
+    }
+    
+    if (!asset) {
+      logger.warn('Could not map Binance symbol to asset', { symbol });
+      return;
     }
     
     const priceData: PriceData = {

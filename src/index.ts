@@ -14,7 +14,6 @@ import { broadcastTransaction, waitForTransaction } from './execution/broadcast'
 let provider: ethers.JsonRpcProvider;
 let signer: ethers.Wallet | null = null;
 let aaveEventListener: AaveEventListener;
-let isRunning = false;
 let blockLoopInterval: NodeJS.Timeout | null = null;
 let activeLiquidations = 0;
 
@@ -93,7 +92,7 @@ async function initialize(): Promise<void> {
   watchConfig();
   
   // Register config change handler
-  onConfigChange((newConfig) => {
+  onConfigChange(() => {
     logger.info('Configuration changed, updating thresholds');
     // HF thresholds and other params are automatically updated
   });
@@ -142,7 +141,6 @@ async function processBlock(): Promise<void> {
       if (prices.size === 0) continue;
       
       const newHF = calculateBorrowerHF(borrower, prices);
-      const config = getConfig();
       
       // Update HF and potentially transition state
       borrowerRegistry.updateBorrowerHF(borrower.address, newHF);
@@ -405,8 +403,6 @@ async function executeLiquidation(borrowerAddress: string): Promise<void> {
 async function shutdown(): Promise<void> {
   logger.info('Shutting down bot...');
   
-  isRunning = false;
-  
   // Stop block loop
   if (blockLoopInterval) {
     clearInterval(blockLoopInterval);
@@ -435,7 +431,6 @@ async function main(): Promise<void> {
     await initialize();
     
     // Start block loop
-    isRunning = true;
     startBlockLoop();
     
     logger.info('=== Bot Running ===');

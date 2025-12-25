@@ -38,7 +38,7 @@ export class AaveEventListener extends EventEmitter {
     });
     
     // Listen to Borrow events
-    this.poolContract.on('Borrow', async (reserve, user, onBehalfOf, amount, interestRateMode, borrowRate, referralCode, event) => {
+    this.poolContract.on('Borrow', async (reserve, user, onBehalfOf, amount, _interestRateMode, _borrowRate, _referralCode, event) => {
       try {
         await this.handleBorrowEvent(reserve, user, onBehalfOf, amount, event);
       } catch (error) {
@@ -47,7 +47,7 @@ export class AaveEventListener extends EventEmitter {
     });
     
     // Listen to Repay events
-    this.poolContract.on('Repay', async (reserve, user, repayer, amount, useATokens, event) => {
+    this.poolContract.on('Repay', async (reserve, user, repayer, amount, _useATokens, event) => {
       try {
         await this.handleRepayEvent(reserve, user, repayer, amount, event);
       } catch (error) {
@@ -56,7 +56,7 @@ export class AaveEventListener extends EventEmitter {
     });
     
     // Listen to LiquidationCall events
-    this.poolContract.on('LiquidationCall', async (collateralAsset, debtAsset, user, debtToCover, liquidatedCollateralAmount, liquidator, receiveAToken, event) => {
+    this.poolContract.on('LiquidationCall', async (collateralAsset, debtAsset, user, debtToCover, liquidatedCollateralAmount, _liquidator, _receiveAToken, event) => {
       try {
         await this.handleLiquidationEvent(collateralAsset, debtAsset, user, debtToCover, liquidatedCollateralAmount, event);
       } catch (error) {
@@ -65,7 +65,7 @@ export class AaveEventListener extends EventEmitter {
     });
     
     // Listen to Supply events (collateral added)
-    this.poolContract.on('Supply', async (reserve, user, onBehalfOf, amount, referralCode, event) => {
+    this.poolContract.on('Supply', async (reserve, user, onBehalfOf, amount, _referralCode, event) => {
       try {
         await this.handleSupplyEvent(reserve, user, onBehalfOf, amount, event);
       } catch (error) {
@@ -89,7 +89,7 @@ export class AaveEventListener extends EventEmitter {
   // Handle Borrow event
   private async handleBorrowEvent(
     reserve: string,
-    user: string,
+    _user: string,
     onBehalfOf: string,
     amount: bigint,
     event: ethers.Log
@@ -102,7 +102,7 @@ export class AaveEventListener extends EventEmitter {
     });
     
     // Add borrower to registry if not exists
-    const borrower = borrowerRegistry.addBorrower(onBehalfOf, BorrowerState.SAFE);
+    borrowerRegistry.addBorrower(onBehalfOf, BorrowerState.SAFE);
     
     // Update cached balances
     await this.updateBorrowerBalances(onBehalfOf);
@@ -118,7 +118,7 @@ export class AaveEventListener extends EventEmitter {
   private async handleRepayEvent(
     reserve: string,
     user: string,
-    repayer: string,
+    _repayer: string,
     amount: bigint,
     event: ethers.Log
   ): Promise<void> {
@@ -176,7 +176,7 @@ export class AaveEventListener extends EventEmitter {
   // Handle Supply event
   private async handleSupplyEvent(
     reserve: string,
-    user: string,
+    _user: string,
     onBehalfOf: string,
     amount: bigint,
     event: ethers.Log
@@ -202,7 +202,7 @@ export class AaveEventListener extends EventEmitter {
   private async handleWithdrawEvent(
     reserve: string,
     user: string,
-    to: string,
+    _to: string,
     amount: bigint,
     event: ethers.Log
   ): Promise<void> {

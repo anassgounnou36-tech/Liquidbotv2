@@ -17,7 +17,6 @@ export async function buildLiquidationTx(
     return null;
   }
   
-  const config = getConfig();
   const addresses = getAaveAddresses();
   
   try {

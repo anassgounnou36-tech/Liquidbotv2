@@ -24,7 +24,7 @@ export interface SimulationResult {
 export async function simulateLiquidation(
   provider: ethers.JsonRpcProvider,
   borrower: Borrower,
-  liquidatorAddress: string
+  _liquidatorAddress: string
 ): Promise<SimulationResult | null> {
   const config = getConfig();
   const addresses = getAaveAddresses();
