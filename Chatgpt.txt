@@ -1,0 +1,244 @@
+# 📩 COPILOT-PERFECT MESSAGE — FULL VERSION
+
+**Project:** Aave v3 Liquidation Bot — Base (2025)
+
+**Goal:**
+Build a **production-grade, high-speed, precision liquidation bot** using TypeScript + ethers.js.
+Focus: **rare liquidations, speed, correctness, capital preservation**.
+
+Bot must be **event-driven**, **state-machine-based**, and **configurable via `.env`**.
+
+---
+
+## 1️⃣ HARD RULES (DO NOT VIOLATE)
+
+* ❌ Do NOT recompute HF for all borrowers per block
+* ❌ Do NOT poll prices per block
+* ❌ Do NOT trust Chainlink as primary signal
+* ❌ Do NOT broadcast to public mempool by default
+* ❌ Do NOT execute unless all conditions are met
+
+✅ Use:
+
+* Event-driven promotion of borrowers (SAFE → WATCH → CRITICAL → LIQUIDATABLE)
+* Off-chain price prediction first
+* Oracle confirmation last
+* Safe failure handling (skip execution on errors)
+
+---
+
+## 2️⃣ TARGET PROTOCOL
+
+* Chain: Base
+* Protocol: Aave v3
+* Phase 1 assets:
+
+  * Debt: USDC
+  * Collateral: WETH, cbETH
+
+Design must allow future expansion to other protocols/assets.
+
+---
+
+## 3️⃣ BORROWER STATE MACHINE
+
+Each borrower must be in **exactly one state**:
+
+```ts
+enum BorrowerState {
+  SAFE,
+  WATCH,
+  CRITICAL,
+  LIQUIDATABLE
+}
+```
+
+**HF thresholds (`.env` hot-reloadable):**
+
+```env
+HF_WATCH=1.10
+HF_CRITICAL=1.04
+HF_LIQUIDATABLE=1.000
+```
+
+**State transition rules:**
+
+* SAFE → WATCH → CRITICAL → LIQUIDATABLE
+* Reverse transitions allowed if HF improves
+* Execution ONLY when LIQUIDATABLE
+
+**Promotion of low-HF users:**
+
+* Occurs **asynchronously** via price events or borrow/repay events
+* SAFE borrowers are promoted to WATCH automatically if HF drops below `HF_WATCH`
+* Ensures **no low-HF borrower is missed**
+
+---
+
+## 4️⃣ HEALTH FACTOR CALCULATION
+
+* ❌ Do NOT use The Graph
+* ❌ Do NOT trust subgraph HF
+* Compute HF **locally** using:
+
+  * Cached collateral balances
+  * Cached debt balances
+  * Aave liquidation thresholds
+  * Predicted off-chain prices
+
+Formula:
+
+```
+HF = (Σ collateral_value × liquidation_threshold) / total_debt
+```
+
+---
+
+## 5️⃣ PRICE ARCHITECTURE
+
+**Primary (off-chain, fastest)**
+
+* Binance WebSocket (spot price)
+* Pyth WebSocket
+
+**Secondary (on-chain confirmation)**
+
+* Aave Chainlink oracle
+* Used ONLY to validate legality before execution
+
+**Prediction logic:**
+
+* If predicted HF < 1 → borrower enters CRITICAL
+* Pre-build tx **before oracle flip**
+* Beat other bots by acting on prediction
+
+---
+
+## 6️⃣ BLOCK LOOP (VERY LIGHT)
+
+On each new block:
+
+1. Update block metadata (number, base fee)
+2. Recompute HF **ONLY for WATCH and CRITICAL borrowers**
+3. Apply state transitions (CRITICAL → LIQUIDATABLE, WATCH → CRITICAL, etc.)
+4. Emit **execution signal** if borrower is LIQUIDATABLE
+5. DO NOT fetch prices
+6. DO NOT scan all borrowers
+7. DO NOT build transactions
+
+**Result:** extremely fast, low-latency response.
+
+---
+
+## 7️⃣ EVENT-DRIVEN COMPONENTS (ALWAYS RUNNING)
+
+**Aave event listeners:**
+
+* Borrow
+* Repay
+* Liquidation
+* Collateral config changes
+
+Used to:
+
+* Add/remove borrowers
+* Update cached balances
+* Promote borrowers between states
+
+**Price listeners:**
+
+* Binance WS
+* Pyth WS
+
+On price update:
+
+* Recompute HF only for affected borrowers
+* Promote SAFE → WATCH → CRITICAL if needed
+
+---
+
+## 8️⃣ CRITICAL STATE BEHAVIOR
+
+When borrower enters CRITICAL:
+
+* Simulate liquidation (`callStatic`)
+* Estimate gas
+* Compute expected profit
+* Build tx
+* Pre-sign tx
+* Cache tx in memory
+
+**No execution yet** — execution occurs only when LIQUIDATABLE.
+
+---
+
+## 9️⃣ EXECUTION ENGINE (LIQUIDATABLE ONLY)
+
+Execute only if:
+
+* BorrowerState == LIQUIDATABLE
+* Oracle price valid on-chain
+* Expected profit ≥ MIN_PROFIT_USD
+* Gas ≤ MAX_GAS_USD
+* ENABLE_EXECUTION = true
+
+**Failure handling:**
+
+* Simulation fails → skip
+* Oracle not updated → skip
+* Base fee spikes → skip
+* Tx not included → retry once, then drop
+
+---
+
+## 🔟 CONFIGURATION (`.env`, hot-reloadable)
+
+```env
+HF_WATCH
+HF_CRITICAL
+HF_LIQUIDATABLE
+MIN_PROFIT_USD
+MAX_GAS_USD
+ENABLE_EXECUTION
+DRY_RUN
+TARGET_DEBT_ASSETS=USDC
+TARGET_COLLATERAL_ASSETS=WETH,cbETH
+MAX_CONCURRENT_TX=1
+```
+
+---
+
+## 1️⃣1️⃣ LOGGING
+
+Log everything:
+
+* State transitions
+* HF changes
+* Predicted vs oracle HF delta
+* Tx lifecycle (prepared, executed, failed)
+* Profit/loss
+
+Required for tuning and auditing.
+
+---
+
+## 1️⃣2️⃣ FINAL DIRECTIVE
+
+* Bot is **risk-monitoring + prediction engine + conditional executor**
+* Not a scanner
+* Not a brute-force mempool spammer
+* Precision > frequency
+
+> When unsure, **skip execution**.
+
+---
+
+✅ **This version ensures:**
+
+* Low-HF borrowers are never missed
+* Event-driven promotion is clear
+* Block loop is light
+* Execution rules are strict
+* Failures are explicitly handled
+
+---
