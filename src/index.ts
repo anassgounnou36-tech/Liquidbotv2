@@ -303,7 +303,7 @@ async function prepareLiquidation(borrowerAddress: string): Promise<void> {
       };
       
       // Store flash result for later use
-      (borrower as any).flashResult = flashSimResult;
+      borrower.flashResult = flashSimResult;
       
     } else {
       // Use traditional direct liquidation
@@ -470,9 +470,9 @@ async function executeLiquidation(borrowerAddress: string): Promise<void> {
     
     // Check if using flash loan based execution
     const useFlashLoan = !!config.flashLiquidatorAddress;
-    const flashResult = (borrower as any).flashResult;
+    const flashResult = borrower.flashResult;
     
-    if (useFlashLoan && flashResult) {
+    if (useFlashLoan && flashResult && flashResult.success) {
       // Execute flash liquidation
       const tx = await executeFlashLiquidation(provider, signer, borrowerAddress, flashResult);
       

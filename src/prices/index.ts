@@ -168,11 +168,20 @@ export class PriceAggregator extends EventEmitter {
   isPriceStale(priceStaleMs: number): boolean {
     const now = Date.now();
     
-    // Check if either feed is stale
-    const binanceStale = this.binanceFeed && (now - this.lastBinanceUpdate > priceStaleMs);
-    const pythStale = this.pythFeed && (now - this.lastPythUpdate > priceStaleMs);
+    // Check if either configured feed is stale
+    let hasStale = false;
     
-    return !!(binanceStale || pythStale);
+    if (this.binanceFeed && this.binanceConnected) {
+      const binanceStale = (now - this.lastBinanceUpdate > priceStaleMs);
+      if (binanceStale) hasStale = true;
+    }
+    
+    if (this.pythFeed && this.pythConnected) {
+      const pythStale = (now - this.lastPythUpdate > priceStaleMs);
+      if (pythStale) hasStale = true;
+    }
+    
+    return hasStale;
   }
   
   // Check if feeds are connected

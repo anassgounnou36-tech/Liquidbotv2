@@ -202,6 +202,7 @@ export async function simulateFlashLiquidation(
 export async function buildFlashLiquidationTx(
   provider: ethers.JsonRpcProvider,
   signer: ethers.Wallet,
+  borrowerAddress: string,
   flashResult: FlashLiquidationResult
 ): Promise<ethers.TransactionRequest | null> {
   const config = getConfig();
@@ -228,9 +229,9 @@ export async function buildFlashLiquidationTx(
       signer
     );
     
-    // Build transaction data
+    // Build transaction data with actual borrower address
     const data = flashLiquidator.interface.encodeFunctionData('execute', [
-      ethers.ZeroAddress, // Will be replaced with actual borrower address
+      borrowerAddress,
       debtAssetAddress,
       collateralAssetAddress,
       flashResult.debtAmount
@@ -256,6 +257,7 @@ export async function buildFlashLiquidationTx(
     };
     
     logger.info('Flash liquidation transaction built', {
+      borrower: borrowerAddress,
       to: tx.to,
       gasLimit: tx.gasLimit?.toString(),
       expectedProfit: flashResult.expectedProfit.toFixed(2)
@@ -264,6 +266,7 @@ export async function buildFlashLiquidationTx(
     return tx;
   } catch (error: any) {
     logger.error('Failed to build flash liquidation tx', {
+      borrower: borrowerAddress,
       error: error.message
     });
     return null;

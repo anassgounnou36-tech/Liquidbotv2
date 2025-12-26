@@ -199,25 +199,39 @@ contract FlashLiquidator is IFlashLoanRecipient {
         uint256 collateralAmount,
         uint256 minDebtAmount
     ) internal returns (uint256) {
-        // PLACEHOLDER: Integrate with actual swap router (Uniswap, 1inch, etc.)
-        // For now, this is a simplified version that assumes swap router is set
+        // IMPORTANT: This is a placeholder implementation
+        // In production, integrate with actual swap router (Uniswap V3, 1inch, etc.)
         
         if (swapRouter == address(0)) {
-            // If no router configured, assume 1:1 swap for testing
-            // In production, this should revert
+            // No router configured - revert with clear message
             revert SwapFailed();
         }
         
         // Approve router to spend collateral
         _ensureApproval(IERC20(collateralAsset), swapRouter);
         
-        // TODO: Call actual swap router here
-        // Example: ISwapRouter(swapRouter).swap(...)
+        // NOTE: Actual swap integration should be added here
+        // Example for Uniswap V3:
+        // ISwapRouter.ExactInputSingleParams memory params = ISwapRouter.ExactInputSingleParams({
+        //     tokenIn: collateralAsset,
+        //     tokenOut: debtAsset,
+        //     fee: 3000, // 0.3%
+        //     recipient: address(this),
+        //     deadline: block.timestamp,
+        //     amountIn: collateralAmount,
+        //     amountOutMinimum: minDebtAmount,
+        //     sqrtPriceLimitX96: 0
+        // });
+        // uint256 amountOut = ISwapRouter(swapRouter).exactInputSingle(params);
         
-        // Return the balance we now have
+        // For now, check if we already have enough debt asset
+        // (This assumes debt was obtained through other means, e.g., pre-funded or same-token liquidation)
         uint256 debtBalance = IERC20(debtAsset).balanceOf(address(this));
         
-        if (debtBalance < minDebtAmount) revert SwapFailed();
+        if (debtBalance < minDebtAmount) {
+            // If swap router is configured, this indicates swap integration is incomplete
+            revert SwapFailed();
+        }
         
         return debtBalance;
     }
@@ -236,12 +250,17 @@ contract FlashLiquidator is IFlashLoanRecipient {
         // Check current allowance
         uint256 currentAllowance = token.allowance(address(this), spender);
         
-        if (currentAllowance == 0) {
+        // Only approve if allowance is insufficient (less than a reasonable threshold)
+        // We use type(uint256).max / 2 as threshold to avoid approval on every small reduction
+        if (currentAllowance < type(uint256).max / 2) {
             // Approve maximum to avoid repeated approvals
             bool success = token.approve(spender, type(uint256).max);
             require(success, "Approval failed");
             
             // Cache the approval
+            _approvalCache[address(token)][spender] = true;
+        } else {
+            // Allowance is sufficient, cache it
             _approvalCache[address(token)][spender] = true;
         }
     }
