@@ -9,6 +9,7 @@ import { calculateBorrowerHF } from './hf/calc';
 import { simulateLiquidation, getOracleHealthFactor } from './execution/sim';
 import { buildLiquidationTx, signTransaction } from './execution/tx';
 import { broadcastTransaction, waitForTransaction } from './execution/broadcast';
+import { simulateFlashLiquidation, executeFlashLiquidation } from './execution/flash';
 
 // Global state
 let provider: ethers.JsonRpcProvider;
@@ -264,47 +265,89 @@ async function prepareLiquidation(borrowerAddress: string): Promise<void> {
       predictedHF: borrower.predictedHF.toFixed(4)
     });
     
-    // Simulate liquidation
-    const simResult = await simulateLiquidation(provider, borrower, signer?.address || '');
+    // Check if FlashLiquidator is configured - use flash loan based execution
+    const useFlashLoan = !!config.flashLiquidatorAddress;
     
-    if (!simResult || !simResult.success) {
-      logger.warn('Liquidation simulation failed', {
-        borrower: borrowerAddress,
-        reason: simResult?.error
-      });
-      return;
-    }
-    
-    // Log simulation result explicitly
-    logger.info('Liquidation simulation succeeded', {
-      borrower: borrowerAddress,
-      profit: simResult.profitUsd.toFixed(2),
-      gas: simResult.gasUsd.toFixed(2),
-      oracleHF: simResult.oracleHF.toFixed(4)
-    });
-    
-    // Update oracle HF
-    borrower.oracleHF = simResult.oracleHF;
-    
-    // Build and cache transaction (only if we have a signer)
-    if (signer) {
-      const cachedTx = await buildLiquidationTx(provider, signer, borrowerAddress, simResult);
+    if (useFlashLoan) {
+      // Simulate flash liquidation with exact flow (including Balancer callback)
+      const flashSimResult = await simulateFlashLiquidation(provider, borrower, signer?.address || '');
       
-      if (cachedTx) {
-        borrower.cachedTx = cachedTx;
-        
-        logger.info('Liquidation transaction prepared', {
+      if (!flashSimResult || !flashSimResult.success) {
+        logger.warn('Flash liquidation simulation failed', {
           borrower: borrowerAddress,
-          expectedProfit: cachedTx.expectedProfitUsd.toFixed(2),
-          estimatedGas: cachedTx.estimatedGasUsd.toFixed(2)
+          reason: flashSimResult?.error
+        });
+        return;
+      }
+      
+      // Log simulation result explicitly
+      logger.info('Flash liquidation simulation succeeded', {
+        borrower: borrowerAddress,
+        profit: flashSimResult.expectedProfit.toFixed(2),
+        gas: flashSimResult.gasUsd.toFixed(2),
+        debtAsset: flashSimResult.debtAsset,
+        collateralAsset: flashSimResult.collateralAsset
+      });
+      
+      // Cache the flash simulation result for execution
+      borrower.cachedTx = {
+        to: config.flashLiquidatorAddress,
+        data: '', // Will be built during execution
+        value: 0n,
+        gasLimit: flashSimResult.gasEstimate,
+        maxFeePerGas: 0n,
+        maxPriorityFeePerGas: 0n,
+        expectedProfitUsd: flashSimResult.expectedProfit,
+        estimatedGasUsd: flashSimResult.gasUsd,
+        preparedAt: Date.now()
+      };
+      
+      // Store flash result for later use
+      (borrower as any).flashResult = flashSimResult;
+      
+    } else {
+      // Use traditional direct liquidation
+      const simResult = await simulateLiquidation(provider, borrower, signer?.address || '');
+      
+      if (!simResult || !simResult.success) {
+        logger.warn('Liquidation simulation failed', {
+          borrower: borrowerAddress,
+          reason: simResult?.error
+        });
+        return;
+      }
+      
+      // Log simulation result explicitly
+      logger.info('Liquidation simulation succeeded', {
+        borrower: borrowerAddress,
+        profit: simResult.profitUsd.toFixed(2),
+        gas: simResult.gasUsd.toFixed(2),
+        oracleHF: simResult.oracleHF.toFixed(4)
+      });
+      
+      // Update oracle HF
+      borrower.oracleHF = simResult.oracleHF;
+      
+      // Build and cache transaction (only if we have a signer)
+      if (signer) {
+        const cachedTx = await buildLiquidationTx(provider, signer, borrowerAddress, simResult);
+        
+        if (cachedTx) {
+          borrower.cachedTx = cachedTx;
+          
+          logger.info('Liquidation transaction prepared', {
+            borrower: borrowerAddress,
+            expectedProfit: cachedTx.expectedProfitUsd.toFixed(2),
+            estimatedGas: cachedTx.estimatedGasUsd.toFixed(2)
+          });
+        }
+      } else {
+        logger.info('Liquidation simulated successfully (no signer available)', {
+          borrower: borrowerAddress,
+          expectedProfit: simResult.profitUsd.toFixed(2),
+          estimatedGas: simResult.gasUsd.toFixed(2)
         });
       }
-    } else {
-      logger.info('Liquidation simulated successfully (no signer available)', {
-        borrower: borrowerAddress,
-        expectedProfit: simResult.profitUsd.toFixed(2),
-        estimatedGas: simResult.gasUsd.toFixed(2)
-      });
     }
   } catch (error) {
     logger.error('Error preparing liquidation', {
@@ -425,32 +468,65 @@ async function executeLiquidation(borrowerAddress: string): Promise<void> {
     
     activeLiquidations++;
     
-    // Sign transaction
-    const signedTx = await signTransaction(signer, borrower.cachedTx);
+    // Check if using flash loan based execution
+    const useFlashLoan = !!config.flashLiquidatorAddress;
+    const flashResult = (borrower as any).flashResult;
     
-    // Broadcast transaction
-    const tx = await broadcastTransaction(provider, signedTx);
-    
-    if (tx) {
-      logger.info('Liquidation transaction sent', {
-        borrower: borrowerAddress,
-        txHash: tx.hash
-      });
+    if (useFlashLoan && flashResult) {
+      // Execute flash liquidation
+      const tx = await executeFlashLiquidation(provider, signer, borrowerAddress, flashResult);
       
-      // Wait for confirmation
-      const receipt = await waitForTransaction(provider, tx.hash);
-      
-      if (receipt && receipt.status === 1) {
-        logger.info('Liquidation successful', {
-          borrower: borrowerAddress,
-          txHash: tx.hash,
-          gasUsed: receipt.gasUsed.toString()
-        });
-      } else {
-        logger.error('Liquidation failed', {
+      if (tx) {
+        logger.info('Flash liquidation transaction sent', {
           borrower: borrowerAddress,
           txHash: tx.hash
         });
+        
+        // Wait for confirmation
+        const receipt = await waitForTransaction(provider, tx.hash);
+        
+        if (receipt && receipt.status === 1) {
+          logger.info('Flash liquidation successful', {
+            borrower: borrowerAddress,
+            txHash: tx.hash,
+            gasUsed: receipt.gasUsed.toString()
+          });
+        } else {
+          logger.error('Flash liquidation failed', {
+            borrower: borrowerAddress,
+            txHash: tx.hash
+          });
+        }
+      }
+    } else {
+      // Traditional direct liquidation
+      // Sign transaction
+      const signedTx = await signTransaction(signer, borrower.cachedTx);
+      
+      // Broadcast transaction
+      const tx = await broadcastTransaction(provider, signedTx);
+      
+      if (tx) {
+        logger.info('Liquidation transaction sent', {
+          borrower: borrowerAddress,
+          txHash: tx.hash
+        });
+        
+        // Wait for confirmation
+        const receipt = await waitForTransaction(provider, tx.hash);
+        
+        if (receipt && receipt.status === 1) {
+          logger.info('Liquidation successful', {
+            borrower: borrowerAddress,
+            txHash: tx.hash,
+            gasUsed: receipt.gasUsed.toString()
+          });
+        } else {
+          logger.error('Liquidation failed', {
+            borrower: borrowerAddress,
+            txHash: tx.hash
+          });
+        }
       }
     }
   } catch (error) {
