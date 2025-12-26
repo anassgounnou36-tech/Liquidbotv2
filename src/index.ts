@@ -134,7 +134,7 @@ async function processBlock(): Promise<void> {
       BorrowerState.CRITICAL
     ]);
     
-    // Recompute HF for WATCH and CRITICAL borrowers
+    // Recompute HF for WATCH and CRITICAL borrowers using cached prices only
     const prices = priceAggregator.getAllPrices();
     
     for (const borrower of watchBorrowers) {
@@ -145,10 +145,7 @@ async function processBlock(): Promise<void> {
       // Update HF and potentially transition state
       borrowerRegistry.updateBorrowerHF(borrower.address, newHF);
       
-      // If transitioned to CRITICAL, prepare transaction
-      if (borrower.state === BorrowerState.CRITICAL && !borrower.cachedTx) {
-        await prepareLiquidation(borrower.address);
-      }
+      // Note: prepareLiquidation is NO LONGER called here (moved to event-driven handlers)
       
       // If transitioned to LIQUIDATABLE, execute
       if (borrower.state === BorrowerState.LIQUIDATABLE) {
@@ -160,11 +157,13 @@ async function processBlock(): Promise<void> {
     if (blockNumber % 100 === 0) {
       const stats = borrowerRegistry.getStats();
       const priceStatus = priceAggregator.getStatus();
+      const stalenessInfo = priceAggregator.getStalenessInfo();
       
       logger.info('Bot statistics', {
         blockNumber,
         borrowers: stats,
         priceFeeds: priceStatus,
+        priceStaleness: stalenessInfo,
         activeLiquidations
       });
     }
@@ -226,17 +225,45 @@ function handleBorrowerUpdate(address: string): void {
 
 // Prepare liquidation (CRITICAL state)
 async function prepareLiquidation(borrowerAddress: string): Promise<void> {
+  const config = getConfig();
   const borrower = borrowerRegistry.getBorrower(borrowerAddress);
+  
   if (!borrower || borrower.state !== BorrowerState.CRITICAL) {
     return;
   }
   
-  logger.info('Preparing liquidation', {
-    borrower: borrowerAddress,
-    predictedHF: borrower.predictedHF.toFixed(4)
-  });
+  // Try to acquire lock for this borrower
+  if (!borrowerRegistry.tryAcquireLock(borrowerAddress)) {
+    logger.debug('Borrower already being processed, skipping preparation', {
+      borrower: borrowerAddress
+    });
+    return;
+  }
   
   try {
+    // Check price staleness before preparation
+    if (priceAggregator.isPriceStale(config.priceStaleMs)) {
+      const stalenessInfo = priceAggregator.getStalenessInfo();
+      logger.warn('Price data is stale, aborting preparation', {
+        borrower: borrowerAddress,
+        stalenessInfo
+      });
+      return;
+    }
+    
+    // Check if feeds are connected
+    if (!priceAggregator.areFeedsConnected()) {
+      logger.warn('Price feeds disconnected, aborting preparation', {
+        borrower: borrowerAddress
+      });
+      return;
+    }
+    
+    logger.info('Preparing liquidation', {
+      borrower: borrowerAddress,
+      predictedHF: borrower.predictedHF.toFixed(4)
+    });
+    
     // Simulate liquidation
     const simResult = await simulateLiquidation(provider, borrower, signer?.address || '');
     
@@ -247,6 +274,14 @@ async function prepareLiquidation(borrowerAddress: string): Promise<void> {
       });
       return;
     }
+    
+    // Log simulation result explicitly
+    logger.info('Liquidation simulation succeeded', {
+      borrower: borrowerAddress,
+      profit: simResult.profitUsd.toFixed(2),
+      gas: simResult.gasUsd.toFixed(2),
+      oracleHF: simResult.oracleHF.toFixed(4)
+    });
     
     // Update oracle HF
     borrower.oracleHF = simResult.oracleHF;
@@ -276,91 +311,120 @@ async function prepareLiquidation(borrowerAddress: string): Promise<void> {
       borrower: borrowerAddress,
       error
     });
+  } finally {
+    // Always release lock
+    borrowerRegistry.releaseLock(borrowerAddress);
   }
 }
 
 // Execute liquidation (LIQUIDATABLE state)
 async function executeLiquidation(borrowerAddress: string): Promise<void> {
+  const config = getConfig();
   const borrower = borrowerRegistry.getBorrower(borrowerAddress);
+  
   if (!borrower || borrower.state !== BorrowerState.LIQUIDATABLE) {
     return;
   }
   
-  const config = getConfig();
-  
-  // Check concurrent tx limit
-  if (activeLiquidations >= config.maxConcurrentTx) {
-    logger.debug('Max concurrent liquidations reached', {
-      active: activeLiquidations,
-      max: config.maxConcurrentTx
-    });
-    return;
-  }
-  
-  // Verify oracle HF
-  const oracleHF = await getOracleHealthFactor(provider, borrowerAddress);
-  borrower.oracleHF = oracleHF;
-  
-  if (oracleHF > config.hfLiquidatable) {
-    logger.warn('Oracle HF above liquidatable threshold, skipping', {
-      borrower: borrowerAddress,
-      oracleHF: oracleHF.toFixed(4)
-    });
-    return;
-  }
-  
-  // Check if we have cached tx
-  if (!borrower.cachedTx) {
-    logger.warn('No cached transaction for liquidatable borrower', {
+  // Try to acquire lock for this borrower
+  if (!borrowerRegistry.tryAcquireLock(borrowerAddress)) {
+    logger.debug('Borrower already being processed, skipping execution', {
       borrower: borrowerAddress
     });
-    await prepareLiquidation(borrowerAddress);
     return;
   }
   
-  // Verify profitability and gas
-  if (borrower.cachedTx.expectedProfitUsd < config.minProfitUsd) {
-    logger.warn('Profit below minimum, skipping', {
-      borrower: borrowerAddress,
-      profit: borrower.cachedTx.expectedProfitUsd.toFixed(2),
-      minProfit: config.minProfitUsd
-    });
-    return;
-  }
-  
-  if (borrower.cachedTx.estimatedGasUsd > config.maxGasUsd) {
-    logger.warn('Gas above maximum, skipping', {
-      borrower: borrowerAddress,
-      gas: borrower.cachedTx.estimatedGasUsd.toFixed(2),
-      maxGas: config.maxGasUsd
-    });
-    return;
-  }
-  
-  // Check if execution is enabled
-  if (!config.enableExecution || config.dryRun) {
-    logger.info('DRY RUN: Would execute liquidation', {
+  try {
+    // Check price staleness before execution
+    if (priceAggregator.isPriceStale(config.priceStaleMs)) {
+      const stalenessInfo = priceAggregator.getStalenessInfo();
+      logger.warn('Price data is stale, aborting execution', {
+        borrower: borrowerAddress,
+        stalenessInfo
+      });
+      return;
+    }
+    
+    // Check if feeds are connected
+    if (!priceAggregator.areFeedsConnected()) {
+      logger.warn('Price feeds disconnected, aborting execution', {
+        borrower: borrowerAddress
+      });
+      return;
+    }
+    
+    // Check concurrent tx limit
+    if (activeLiquidations >= config.maxConcurrentTx) {
+      logger.debug('Max concurrent liquidations reached', {
+        active: activeLiquidations,
+        max: config.maxConcurrentTx
+      });
+      return;
+    }
+    
+    // Verify oracle HF (final confirmation)
+    const oracleHF = await getOracleHealthFactor(provider, borrowerAddress);
+    borrower.oracleHF = oracleHF;
+    
+    if (oracleHF > config.hfLiquidatable) {
+      logger.warn('Oracle HF above liquidatable threshold, skipping', {
+        borrower: borrowerAddress,
+        oracleHF: oracleHF.toFixed(4)
+      });
+      return;
+    }
+    
+    // Check if we have cached tx
+    if (!borrower.cachedTx) {
+      logger.warn('No cached transaction for liquidatable borrower', {
+        borrower: borrowerAddress
+      });
+      await prepareLiquidation(borrowerAddress);
+      return;
+    }
+    
+    // Verify profitability and gas
+    if (borrower.cachedTx.expectedProfitUsd < config.minProfitUsd) {
+      logger.warn('Profit below minimum, skipping', {
+        borrower: borrowerAddress,
+        profit: borrower.cachedTx.expectedProfitUsd.toFixed(2),
+        minProfit: config.minProfitUsd
+      });
+      return;
+    }
+    
+    if (borrower.cachedTx.estimatedGasUsd > config.maxGasUsd) {
+      logger.warn('Gas above maximum, skipping', {
+        borrower: borrowerAddress,
+        gas: borrower.cachedTx.estimatedGasUsd.toFixed(2),
+        maxGas: config.maxGasUsd
+      });
+      return;
+    }
+    
+    // Check if execution is enabled
+    if (!config.enableExecution || config.dryRun) {
+      logger.info('DRY RUN: Would execute liquidation', {
+        borrower: borrowerAddress,
+        expectedProfit: borrower.cachedTx.expectedProfitUsd.toFixed(2),
+        oracleHF: oracleHF.toFixed(4)
+      });
+      return;
+    }
+    
+    if (!signer) {
+      logger.error('Cannot execute: signer not available');
+      return;
+    }
+    
+    logger.info('Executing liquidation', {
       borrower: borrowerAddress,
       expectedProfit: borrower.cachedTx.expectedProfitUsd.toFixed(2),
       oracleHF: oracleHF.toFixed(4)
     });
-    return;
-  }
-  
-  if (!signer) {
-    logger.error('Cannot execute: signer not available');
-    return;
-  }
-  
-  logger.info('Executing liquidation', {
-    borrower: borrowerAddress,
-    expectedProfit: borrower.cachedTx.expectedProfitUsd.toFixed(2),
-    oracleHF: oracleHF.toFixed(4)
-  });
-  
-  activeLiquidations++;
-  
-  try {
+    
+    activeLiquidations++;
+    
     // Sign transaction
     const signedTx = await signTransaction(signer, borrower.cachedTx);
     
@@ -396,6 +460,8 @@ async function executeLiquidation(borrowerAddress: string): Promise<void> {
     });
   } finally {
     activeLiquidations--;
+    // Always release lock
+    borrowerRegistry.releaseLock(borrowerAddress);
   }
 }
 

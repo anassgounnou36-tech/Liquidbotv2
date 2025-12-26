@@ -12,6 +12,12 @@ export class PriceAggregator extends EventEmitter {
   private prices: Map<string, PriceData> = new Map();
   private updateDebounceTimers: Map<string, NodeJS.Timeout> = new Map();
   
+  // Track last update timestamps for staleness checks
+  private lastBinanceUpdate: number = 0;
+  private lastPythUpdate: number = 0;
+  private binanceConnected: boolean = false;
+  private pythConnected: boolean = false;
+  
   constructor() {
     super();
   }
@@ -25,14 +31,18 @@ export class PriceAggregator extends EventEmitter {
       this.binanceFeed = new BinancePriceFeed(config.binanceSymbols);
       
       this.binanceFeed.on('price', (priceData: PriceData) => {
+        this.lastBinanceUpdate = Date.now();
         this.handlePriceUpdate(priceData);
       });
       
       this.binanceFeed.on('connected', () => {
+        this.binanceConnected = true;
+        this.lastBinanceUpdate = Date.now();
         logger.info('Binance price feed connected');
       });
       
       this.binanceFeed.on('error', (error: Error) => {
+        this.binanceConnected = false;
         logger.error('Binance price feed error', { error: error.message });
       });
       
@@ -44,14 +54,18 @@ export class PriceAggregator extends EventEmitter {
       this.pythFeed = new PythPriceFeed(config.pythFeedIds);
       
       this.pythFeed.on('price', (priceData: PriceData) => {
+        this.lastPythUpdate = Date.now();
         this.handlePriceUpdate(priceData);
       });
       
       this.pythFeed.on('connected', () => {
+        this.pythConnected = true;
+        this.lastPythUpdate = Date.now();
         logger.info('Pyth price feed connected');
       });
       
       this.pythFeed.on('error', (error: Error) => {
+        this.pythConnected = false;
         logger.error('Pyth price feed error', { error: error.message });
       });
       
@@ -147,6 +161,39 @@ export class PriceAggregator extends EventEmitter {
       binance: this.binanceFeed?.isActive() || false,
       pyth: this.pythFeed?.isActive() || false,
       priceCount: this.prices.size
+    };
+  }
+  
+  // Check if prices are stale
+  isPriceStale(priceStaleMs: number): boolean {
+    const now = Date.now();
+    
+    // Check if either feed is stale
+    const binanceStale = this.binanceFeed && (now - this.lastBinanceUpdate > priceStaleMs);
+    const pythStale = this.pythFeed && (now - this.lastPythUpdate > priceStaleMs);
+    
+    return !!(binanceStale || pythStale);
+  }
+  
+  // Check if feeds are connected
+  areFeedsConnected(): boolean {
+    // At least one feed must be connected
+    return this.binanceConnected || this.pythConnected;
+  }
+  
+  // Get price staleness info
+  getStalenessInfo(): {
+    binanceAge: number;
+    pythAge: number;
+    binanceConnected: boolean;
+    pythConnected: boolean;
+  } {
+    const now = Date.now();
+    return {
+      binanceAge: this.lastBinanceUpdate > 0 ? now - this.lastBinanceUpdate : -1,
+      pythAge: this.lastPythUpdate > 0 ? now - this.lastPythUpdate : -1,
+      binanceConnected: this.binanceConnected,
+      pythConnected: this.pythConnected
     };
   }
 }

@@ -9,7 +9,9 @@
     "dev": "ts-node src/index.ts",
     "test": "jest",
     "lint": "eslint src/**/*.ts",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "compile": "hardhat compile",
+    "deploy": "hardhat run scripts/deploy.ts"
   },
   "keywords": [
     "aave",
@@ -38,7 +40,12 @@
     "ts-jest": "^29.2.5",
     "@typescript-eslint/eslint-plugin": "^8.19.1",
     "@typescript-eslint/parser": "^8.19.1",
-    "eslint": "^9.17.0"
+    "eslint": "^9.17.0",
+    "hardhat": "^2.19.4",
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "@typechain/ethers-v6": "^0.5.1",
+    "@typechain/hardhat": "^9.1.0",
+    "typechain": "^8.3.2"
   },
   "engines": {
     "node": ">=18.0.0"

@@ -5,6 +5,7 @@ import logger from '../logging/logger';
 // Borrower registry
 class BorrowerRegistry {
   private borrowers: Map<string, Borrower> = new Map();
+  private borrowerMutex: Map<string, boolean> = new Map();
   
   // Get borrower by address
   getBorrower(address: string): Borrower | undefined {
@@ -123,7 +124,34 @@ class BorrowerRegistry {
   // Clear registry (for testing)
   clear(): void {
     this.borrowers.clear();
+    this.borrowerMutex.clear();
     logger.info('Borrower registry cleared');
+  }
+  
+  // Borrower-level mutex methods
+  
+  // Try to acquire lock for borrower (returns true if acquired, false if already locked)
+  tryAcquireLock(address: string): boolean {
+    const key = address.toLowerCase();
+    
+    if (this.borrowerMutex.get(key)) {
+      return false; // Already locked
+    }
+    
+    this.borrowerMutex.set(key, true);
+    return true;
+  }
+  
+  // Release lock for borrower
+  releaseLock(address: string): void {
+    const key = address.toLowerCase();
+    this.borrowerMutex.delete(key);
+  }
+  
+  // Check if borrower is locked
+  isLocked(address: string): boolean {
+    const key = address.toLowerCase();
+    return this.borrowerMutex.get(key) || false;
   }
 }
 

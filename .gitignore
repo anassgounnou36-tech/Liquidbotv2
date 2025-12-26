@@ -8,6 +8,12 @@ dist/
 build/
 *.tsbuildinfo
 
+# Hardhat
+cache/
+artifacts/
+typechain-types/
+deployment.json
+
 # Environment variables
 .env
 .env.local

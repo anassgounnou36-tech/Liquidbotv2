@@ -15,6 +15,10 @@ export interface BotConfig {
   aavePoolAddress: string;
   aaveOracleAddress: string;
   
+  // Flash Liquidator
+  flashLiquidatorAddress: string;
+  swapRouterAddress: string;
+  
   // Health Factor thresholds
   hfWatch: number;
   hfCritical: number;
@@ -38,6 +42,7 @@ export interface BotConfig {
   pythWsUrl: string;
   pythFeedIds: string[];
   pythFeedMap: Map<string, string>;
+  priceStaleMs: number;
   
   // Relay
   relayMode: 'none' | 'flashbots' | 'custom';
@@ -78,6 +83,10 @@ function parseConfig(): BotConfig {
     aavePoolAddress: process.env.AAVE_POOL_ADDRESS || '',
     aaveOracleAddress: process.env.AAVE_ORACLE_ADDRESS || '',
     
+    // Flash Liquidator
+    flashLiquidatorAddress: process.env.FLASH_LIQUIDATOR_ADDRESS || '',
+    swapRouterAddress: process.env.SWAP_ROUTER_ADDRESS || '',
+    
     // Health Factor thresholds
     hfWatch: parseFloat(process.env.HF_WATCH || '1.10'),
     hfCritical: parseFloat(process.env.HF_CRITICAL || '1.04'),
@@ -101,6 +110,7 @@ function parseConfig(): BotConfig {
     pythWsUrl: process.env.PYTH_WS_URL || 'wss://hermes.pyth.network/ws',
     pythFeedIds: (process.env.PYTH_PRICE_FEED_IDS || '').split(',').map(s => s.trim()).filter(s => s),
     pythFeedMap: parseMapFromEnv(process.env.PYTH_FEED_MAP || ''),
+    priceStaleMs: parseInt(process.env.PRICE_STALE_MS || '5000', 10),
     
     // Relay
     relayMode: (process.env.RELAY_MODE || 'none') as 'none' | 'flashbots' | 'custom',
