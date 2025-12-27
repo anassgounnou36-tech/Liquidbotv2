@@ -1,7 +1,7 @@
 import { ethers } from 'ethers';
 import { Borrower } from '../state/borrower';
 import { getAaveAddresses, AAVE_POOL_ABI, AAVE_ORACLE_ABI } from '../aave/addresses';
-import { getTokenAddress } from '../tokens';
+import { getTokenAddress, getTokenDecimalsByAddressCached } from '../tokens';
 import { estimateLiquidation } from '../hf/calc';
 import { priceAggregator } from '../prices';
 import { getConfig } from '../config/env';
@@ -251,17 +251,22 @@ export async function getTotalDebtUSD(
       continue;
     }
     
-    // Get decimals for the asset using address
+    // Get decimals for the asset using address with cached fallback
+    // While the cached function has robust error handling, we wrap in try-catch
+    // as defensive coding to handle any unexpected issues and continue processing
     const assetAddress = getTokenAddress(debtBalance.asset);
-    const ERC20_ABI = ['function decimals() external view returns (uint8)'];
-    const tokenContract = new ethers.Contract(assetAddress, ERC20_ABI, provider);
     
     try {
-      const decimals = await tokenContract.decimals();
+      const decimals = await getTokenDecimalsByAddressCached(provider, assetAddress);
       const amount = Number(debtBalance.amount) / Math.pow(10, decimals);
       totalDebtUSD += amount * price;
     } catch (error) {
-      logger.error('Failed to get decimals for asset address', { asset: debtBalance.asset, address: assetAddress, error });
+      logger.warn('Unexpected error getting decimals, skipping asset in debt calculation', { 
+        asset: debtBalance.asset, 
+        address: assetAddress, 
+        error 
+      });
+      // Skip this asset but continue processing others
     }
   }
   
