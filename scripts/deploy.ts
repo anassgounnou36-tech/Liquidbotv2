@@ -10,6 +10,7 @@ async function main() {
   
   // Get deployment parameters from environment
   const aavePoolAddress = process.env.AAVE_POOL_ADDRESS || "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5";
+  const oneInchRouter = process.env.ONEINCH_ROUTER_ADDRESS || "0x1111111254EEB25477B68fb85Ed929f73A960582";
   
   // Get signer address (admin will be the deployer)
   const [deployer] = await ethers.getSigners();
@@ -17,16 +18,14 @@ async function main() {
   
   console.log("Deploying from:", adminAddress);
   console.log("Aave Pool:", aavePoolAddress);
+  console.log("1inch Router:", oneInchRouter);
   
-  // Set initial swap router to zero address (will be configured later)
-  const initialSwapRouter = ethers.ZeroAddress;
-  
-  // Deploy FlashLiquidator
+  // Deploy FlashLiquidator with 1inch router
   const FlashLiquidator = await ethers.getContractFactory("FlashLiquidator");
   const flashLiquidator = await FlashLiquidator.deploy(
     aavePoolAddress,
     adminAddress,
-    initialSwapRouter
+    oneInchRouter
   );
   
   await flashLiquidator.waitForDeployment();
@@ -39,7 +38,7 @@ async function main() {
     flashLiquidator: address,
     aavePool: aavePoolAddress,
     admin: adminAddress,
-    swapRouter: initialSwapRouter,
+    oneInchRouter: oneInchRouter,
     network: "base",
     chainId: 8453,
     deployedAt: new Date().toISOString(),
@@ -71,10 +70,13 @@ async function main() {
   }
   
   console.log("\n=== Deployment Complete ===");
-  console.log("Next steps:");
-  console.log("1. Configure swap router using: updateSwapRouter(address)");
-  console.log("2. Update TypeScript execution to use FlashLiquidator");
-  console.log("3. Test with dry run before enabling execution");
+  console.log("FlashLiquidator is configured with 1inch router for swaps:");
+  console.log("  - WETH -> USDC");
+  console.log("  - cbETH -> USDC");
+  console.log("\nNext steps:");
+  console.log("1. Ensure ONEINCH_ROUTER_ADDRESS and MAX_SLIPPAGE_BPS are set in .env");
+  console.log("2. Test flash liquidation with dry run before enabling execution");
+  console.log("3. Monitor logs for 1inch swap details and slippage");
 }
 
 main()
