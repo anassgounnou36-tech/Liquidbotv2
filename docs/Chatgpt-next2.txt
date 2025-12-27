@@ -1,0 +1,205 @@
+## (Next PR – Mandatory Changes Before Testing)
+
+You have implemented the flash-loan–based liquidation bot.
+The architecture is correct, but **the bot is NOT executable yet**.
+
+This PR must **complete the execution path** and **close all remaining safety gaps**.
+
+Follow the instructions **exactly**.
+Do NOT assume defaults.
+If something is unclear, implement the safest option.
+
+---
+
+## 1️⃣ IMPLEMENT REAL SWAP USING 1INCH (CRITICAL)
+
+### Problem
+
+`FlashLiquidator.sol` currently contains a **placeholder swap**.
+Without a real swap, **flash loans will always revert**.
+
+### Required solution
+
+Integrate **1inch aggregation** for swapping seized collateral → debt asset.
+
+---
+
+### Contract-level requirements (`FlashLiquidator.sol`)
+
+1. Add a configurable `ONEINCH_ROUTER` address
+2. Implement `_swapCollateralToDebt()` using 1inch calldata
+3. Support:
+
+   * WETH → USDC
+   * cbETH → USDC
+4. Enforce:
+
+   * `amountOutMinimum`
+   * slippage protection (configurable)
+5. Revert if:
+
+   * Swap output < debt repayment
+   * Profit ≤ 0
+
+---
+
+### Execution flow inside `receiveFlashLoan`
+
+```
+receiveFlashLoan():
+ ├─ Aave.liquidationCall()
+ ├─ collateralReceived = balanceDelta()
+ ├─ swappedDebt = oneInchSwap(collateralReceived)
+ ├─ require(swappedDebt >= loanAmount + fee)
+ ├─ repayBalancer()
+ └─ keepProfit()
+```
+
+---
+
+### Simulation requirement (NON-NEGOTIABLE)
+
+Before execution:
+
+* Use `callStatic.receiveFlashLoan()`
+* Pass **exact calldata** including 1inch swap payload
+* Abort execution if simulation fails
+
+---
+
+## 2️⃣ ADD STRICT ORACLE CONFIRMATION BEFORE EXECUTION
+
+### Problem
+
+Off-chain prediction alone is not enough.
+Liquidation must be **legal on-chain**.
+
+### Required change (TypeScript, execution layer)
+
+Immediately before sending the tx:
+
+1. Fetch Aave Oracle prices
+2. Recompute HF **using oracle prices**
+3. Abort execution if:
+
+```
+hfOnChain >= 1.0
+```
+
+This check must be:
+
+* After simulation
+* Before broadcast
+* Mandatory
+
+---
+
+## 3️⃣ ENFORCE HARD PROFIT FLOOR
+
+### Required rule
+
+Execution must abort if:
+
+```
+expectedProfitUsd < MIN_PROFIT_USD
+```
+
+Where:
+
+* Profit is calculated **after swap**
+* Gas cost is subtracted
+* Checked immediately before execution
+
+No exceptions.
+
+---
+
+## 4️⃣ PRICE FEED FAILURE POLICY (CLARIFY & IMPLEMENT)
+
+You already detect staleness.
+Now enforce behavior:
+
+* If Binance WS is live → allow execution
+* If Binance WS is down but Pyth is live → allow execution
+* If BOTH are stale → **disable execution**
+
+Execution must fail closed.
+
+---
+
+## 5️⃣ SLIPPAGE & SAFETY CONTROLS (MANDATORY)
+
+Add config:
+
+```env
+MAX_SLIPPAGE_BPS=50
+```
+
+Enforce:
+
+* `amountOutMinimum` for 1inch swap
+* Conservative defaults
+* Revert on excessive slippage
+
+---
+
+## 6️⃣ FINAL SAFETY CONFIRMATIONS (VERIFY & FIX IF NEEDED)
+
+Explicitly verify and enforce:
+
+* Execution only allowed in `LIQUIDATABLE` state
+* Borrower-level mutex prevents concurrent execution
+* Cached tx invalidated if:
+
+  * Price changes
+  * HF improves
+  * Block advances too far
+* Gas guard enforced (USD-based)
+
+---
+
+## 7️⃣ LOGGING (EXTEND)
+
+Add logs for:
+
+* 1inch quote received
+* Swap input/output
+* Profit before/after swap
+* Oracle HF at execution time
+* Reason for aborted execution
+
+Logs must be sufficient to replay failures.
+
+---
+
+## 8️⃣ AFTER IMPLEMENTATION – REQUIRED SELF-CHECK
+
+After this PR, answer explicitly:
+
+1. Is the swap real or still a placeholder?
+2. Can a flash loan be repaid end-to-end?
+3. Is oracle HF checked before execution?
+4. Can gas be spent without profit checks? (must be NO)
+5. Can execution happen without 1inch calldata? (must be NO)
+6. Is this safe to test on forked Base? (must be YES)
+
+---
+
+## FINAL DIRECTIVE
+
+This PR must make the bot:
+
+* Fully executable via flash loans
+* Swap-complete
+* Oracle-safe
+* Profit-protected
+
+Do NOT optimize further.
+Do NOT add new features.
+Focus only on **correctness and safety**.
+
+---
+
+### END OF MESSAGE
+
+---

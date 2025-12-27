@@ -6,10 +6,13 @@ A production-grade, event-driven liquidation bot for Aave v3 on Base network, bu
 
 - **Event-Driven Architecture**: Reacts to price changes and Aave events instead of polling
 - **Balancer Flash Loans**: Zero-capital liquidations using Balancer V2 flash loans
+- **1inch Integration**: Real collateral-to-debt swaps using 1inch aggregation router
 - **State Machine**: Borrowers transition through SAFE → WATCH → CRITICAL → LIQUIDATABLE states
 - **Off-Chain Price Prediction**: Uses Binance and Pyth WebSocket feeds for fast price updates
 - **Price Staleness Guards**: Aborts execution if price feeds are stale or disconnected
+- **Fail-Closed Policy**: Requires at least one price feed (Binance OR Pyth) to be live
 - **Oracle Confirmation**: Verifies liquidation legality with on-chain oracle before execution
+- **Strict Safety Controls**: Cache invalidation, block TTL, profit floor enforcement
 - **Borrower-Level Mutex**: Prevents concurrent operations on the same borrower
 - **Strict Block Loop**: Only recomputes HF for WATCH/CRITICAL borrowers using cached prices
 - **Hot-Reloadable Configuration**: Update thresholds without restarting the bot
@@ -88,12 +91,27 @@ npm run compile
 npm run deploy
 
 # The deployment script will automatically update .env with the contract address
-# Configure a swap router address if needed for collateral -> debt swaps
 ```
 
 The FlashLiquidator contract will be deployed to Base mainnet and the address will be saved in:
 - `.env` file (FLASH_LIQUIDATOR_ADDRESS)
 - `deployment.json` file
+
+### 1inch Integration for Collateral Swaps
+
+The FlashLiquidator contract uses **1inch aggregation router** to swap seized collateral into debt assets:
+
+- **Router Address**: `0x1111111254EEB25477B68fb85Ed929f73A960582` (Base mainnet)
+- **Supported Swaps**: WETH → USDC, cbETH → USDC
+- **Slippage Protection**: Configurable via `MAX_SLIPPAGE_BPS` (default: 50 = 0.50%)
+- **Simulation**: All swaps are simulated via `callStatic` before execution
+- **Safety**: Contract enforces `amountOutMinimum` and reverts on excessive slippage
+
+The TypeScript bot builds 1inch swap calldata off-chain and passes it to the contract during execution. This ensures:
+1. Real-time optimal routing
+2. Configurable slippage tolerance
+3. Simulation-based safety checks
+4. On-chain enforcement of minimum output
 
 ## ⚙️ Configuration
 
@@ -113,7 +131,15 @@ AAVE_ORACLE_ADDRESS=0x2Cc0Fc26eD4563A5ce5e8bdcfe1A2878676Ae156
 
 # Flash Liquidator (optional, for flash loan execution)
 FLASH_LIQUIDATOR_ADDRESS=your_deployed_contract_address
-SWAP_ROUTER_ADDRESS=your_swap_router_address
+
+# 1inch Router address for collateral -> debt swaps (Base mainnet)
+ONEINCH_ROUTER_ADDRESS=0x1111111254EEB25477B68fb85Ed929f73A960582
+
+# Maximum slippage in basis points (e.g., 50 = 0.50%)
+MAX_SLIPPAGE_BPS=50
+
+# Transaction cache TTL in blocks
+TX_CACHE_TTL_BLOCKS=5
 
 # Health Factor Thresholds (hot-reloadable)
 HF_WATCH=1.10
@@ -182,7 +208,46 @@ npm test
 - ❌ Do NOT broadcast to public mempool by default
 - ❌ Do NOT execute unless all conditions are met
 - ❌ Do NOT execute if price feeds are stale or disconnected
+- ❌ Do NOT execute if BOTH Binance and Pyth feeds are down (fail-closed policy)
+- ❌ Do NOT execute if oracle HF >= 1.0
+- ❌ Do NOT execute if net profit (after gas) < MIN_PROFIT_USD
+- ❌ Do NOT execute without 1inch swap calldata
 - ❌ Do NOT prepare liquidations in the block loop (event-driven only)
+
+### Safety Controls
+
+1. **Price Feed Policy (Fail-Closed)**
+   - Requires at least one feed (Binance OR Pyth) to be live
+   - Aborts execution if both feeds are stale or disconnected
+   - Logs detailed feed status for post-mortem analysis
+
+2. **Oracle HF Confirmation**
+   - Fetches on-chain Aave Oracle prices before execution
+   - Recomputes HF using oracle prices
+   - Aborts if oracle HF >= 1.0 (not liquidatable on-chain)
+   - Mandatory check after simulation, before broadcast
+
+3. **Hard Profit Floor**
+   - Calculates net profit: `expectedProfit - gasUsd`
+   - Aborts if net profit < MIN_PROFIT_USD
+   - No exceptions, enforced immediately before execution
+
+4. **Cache Invalidation**
+   - Cached transactions expire after `TX_CACHE_TTL_BLOCKS` blocks
+   - Cache invalidated on significant price changes
+   - Cache invalidated when HF improves out of liquidatable range
+   - Prevents execution of stale liquidation parameters
+
+5. **Slippage Protection**
+   - Configurable `MAX_SLIPPAGE_BPS` for 1inch swaps
+   - On-chain enforcement via `amountOutMinimum`
+   - Contract reverts if swap output < required amount
+   - Simulated before execution via `callStatic`
+
+6. **Borrower-Level Mutex**
+   - Prevents concurrent preparation/execution for same borrower
+   - Lock acquired before preparation or execution
+   - Always released in finally block
 
 ### Best Practices
 

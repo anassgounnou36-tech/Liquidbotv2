@@ -18,6 +18,9 @@ export interface BotConfig {
   // Flash Liquidator
   flashLiquidatorAddress: string;
   swapRouterAddress: string;
+  oneInchRouterAddress: string;
+  maxSlippageBps: number;
+  txCacheTtlBlocks: number;
   
   // Health Factor thresholds
   hfWatch: number;
@@ -86,6 +89,9 @@ function parseConfig(): BotConfig {
     // Flash Liquidator
     flashLiquidatorAddress: process.env.FLASH_LIQUIDATOR_ADDRESS || '',
     swapRouterAddress: process.env.SWAP_ROUTER_ADDRESS || '',
+    oneInchRouterAddress: process.env.ONEINCH_ROUTER_ADDRESS || '0x1111111254EEB25477B68fb85Ed929f73A960582',
+    maxSlippageBps: parseInt(process.env.MAX_SLIPPAGE_BPS || '50', 10),
+    txCacheTtlBlocks: parseInt(process.env.TX_CACHE_TTL_BLOCKS || '5', 10),
     
     // Health Factor thresholds
     hfWatch: parseFloat(process.env.HF_WATCH || '1.10'),

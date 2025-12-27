@@ -63,6 +63,10 @@ class BorrowerRegistry {
     const config = getConfig();
     const now = Date.now();
     
+    // Store old values for logging
+    const oldHF = borrower.predictedHF;
+    const oldState = borrower.state;
+    
     // Update HF values
     borrower.predictedHF = predictedHF;
     if (oracleHF !== undefined) {
@@ -79,19 +83,72 @@ class BorrowerRegistry {
       config.hfLiquidatable
     );
     
+    // Invalidate cached tx if HF improved out of CRITICAL/LIQUIDATABLE range
+    if (borrower.cachedTx && newState === BorrowerState.WATCH && 
+        (oldState === BorrowerState.CRITICAL || oldState === BorrowerState.LIQUIDATABLE)) {
+      logger.info('Invalidating cached tx: HF improved', {
+        address: borrower.address,
+        oldHF: oldHF.toFixed(4),
+        newHF: predictedHF.toFixed(4),
+        oldState,
+        newState
+      });
+      borrower.cachedTx = undefined;
+      borrower.flashResult = undefined;
+      borrower.preparedBlockNumber = undefined;
+    }
+    
     // Update state if changed
     if (newState !== borrower.state) {
-      const oldState = borrower.state;
       updateBorrowerState(borrower, newState, predictedHF);
       
       logger.info('Borrower state transition', {
         address: borrower.address,
         oldState,
         newState,
-        predictedHF: predictedHF.toFixed(4),
+        oldHF: oldHF.toFixed(4),
+        newHF: predictedHF.toFixed(4),
         oracleHF: borrower.oracleHF.toFixed(4)
       });
     }
+  }
+  
+  // Invalidate cached tx for a borrower (e.g., on price change)
+  invalidateCachedTx(address: string, reason: string): void {
+    const borrower = this.getBorrower(address);
+    if (borrower && borrower.cachedTx) {
+      logger.info('Invalidating cached tx', {
+        address: borrower.address,
+        reason
+      });
+      borrower.cachedTx = undefined;
+      borrower.flashResult = undefined;
+      borrower.preparedBlockNumber = undefined;
+    }
+  }
+  
+  // Check if cached tx is stale (beyond TTL)
+  isCachedTxStale(address: string, currentBlock: number): boolean {
+    const borrower = this.getBorrower(address);
+    if (!borrower || !borrower.cachedTx || !borrower.preparedBlockNumber) {
+      return false;
+    }
+    
+    const config = getConfig();
+    const blockAge = currentBlock - borrower.preparedBlockNumber;
+    
+    if (blockAge > config.txCacheTtlBlocks) {
+      logger.info('Cached tx is stale', {
+        address: borrower.address,
+        preparedBlock: borrower.preparedBlockNumber,
+        currentBlock,
+        blockAge,
+        ttl: config.txCacheTtlBlocks
+      });
+      return true;
+    }
+    
+    return false;
   }
   
   // Mark borrower as updated (for event tracking)

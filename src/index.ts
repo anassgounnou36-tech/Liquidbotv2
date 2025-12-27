@@ -190,6 +190,12 @@ function handlePriceUpdate(asset: string): void {
     // Recompute HF
     const newHF = calculateBorrowerHF(borrower, prices);
     
+    // Invalidate cached tx on price change for CRITICAL/LIQUIDATABLE borrowers
+    if ((borrower.state === BorrowerState.CRITICAL || borrower.state === BorrowerState.LIQUIDATABLE) && 
+        borrower.cachedTx) {
+      borrowerRegistry.invalidateCachedTx(borrower.address, `Price change for ${asset}`);
+    }
+    
     // Update HF and potentially transition state
     borrowerRegistry.updateBorrowerHF(borrower.address, newHF);
     
@@ -286,8 +292,12 @@ async function prepareLiquidation(borrowerAddress: string): Promise<void> {
         profit: flashSimResult.expectedProfit.toFixed(2),
         gas: flashSimResult.gasUsd.toFixed(2),
         debtAsset: flashSimResult.debtAsset,
-        collateralAsset: flashSimResult.collateralAsset
+        collateralAsset: flashSimResult.collateralAsset,
+        minAmountOut: flashSimResult.minAmountOut.toString()
       });
+      
+      // Get current block number for TTL tracking
+      const currentBlock = await provider.getBlockNumber();
       
       // Cache the flash simulation result for execution
       borrower.cachedTx = {
@@ -302,8 +312,9 @@ async function prepareLiquidation(borrowerAddress: string): Promise<void> {
         preparedAt: Date.now()
       };
       
-      // Store flash result for later use
+      // Store flash result and block number for later use
       borrower.flashResult = flashSimResult;
+      borrower.preparedBlockNumber = currentBlock;
       
     } else {
       // Use traditional direct liquidation
@@ -333,12 +344,17 @@ async function prepareLiquidation(borrowerAddress: string): Promise<void> {
         const cachedTx = await buildLiquidationTx(provider, signer, borrowerAddress, simResult);
         
         if (cachedTx) {
+          // Get current block number for TTL tracking
+          const currentBlock = await provider.getBlockNumber();
+          
           borrower.cachedTx = cachedTx;
+          borrower.preparedBlockNumber = currentBlock;
           
           logger.info('Liquidation transaction prepared', {
             borrower: borrowerAddress,
             expectedProfit: cachedTx.expectedProfitUsd.toFixed(2),
-            estimatedGas: cachedTx.estimatedGasUsd.toFixed(2)
+            estimatedGas: cachedTx.estimatedGasUsd.toFixed(2),
+            preparedBlock: currentBlock
           });
         }
       } else {
@@ -378,7 +394,19 @@ async function executeLiquidation(borrowerAddress: string): Promise<void> {
   }
   
   try {
-    // Check price staleness before execution
+    // Check price feed policy (fail-closed: Binance OR Pyth must be live)
+    const feedPolicy = priceAggregator.canExecuteLiquidation(config.priceStaleMs);
+    if (!feedPolicy.allowed) {
+      const feedStatus = priceAggregator.getFeedStatus(config.priceStaleMs);
+      logger.warn('Price feed policy check failed, aborting execution', {
+        borrower: borrowerAddress,
+        reason: feedPolicy.reason,
+        feedStatus
+      });
+      return;
+    }
+    
+    // Check price staleness before execution (additional check)
     if (priceAggregator.isPriceStale(config.priceStaleMs)) {
       const stalenessInfo = priceAggregator.getStalenessInfo();
       logger.warn('Price data is stale, aborting execution', {
@@ -405,19 +433,7 @@ async function executeLiquidation(borrowerAddress: string): Promise<void> {
       return;
     }
     
-    // Verify oracle HF (final confirmation)
-    const oracleHF = await getOracleHealthFactor(provider, borrowerAddress);
-    borrower.oracleHF = oracleHF;
-    
-    if (oracleHF > config.hfLiquidatable) {
-      logger.warn('Oracle HF above liquidatable threshold, skipping', {
-        borrower: borrowerAddress,
-        oracleHF: oracleHF.toFixed(4)
-      });
-      return;
-    }
-    
-    // Check if we have cached tx
+    // Check if cached tx exists
     if (!borrower.cachedTx) {
       logger.warn('No cached transaction for liquidatable borrower', {
         borrower: borrowerAddress
@@ -426,9 +442,75 @@ async function executeLiquidation(borrowerAddress: string): Promise<void> {
       return;
     }
     
-    // Verify profitability and gas
+    // Check if cached tx is stale (beyond TTL)
+    const currentBlock = await provider.getBlockNumber();
+    if (borrowerRegistry.isCachedTxStale(borrowerAddress, currentBlock)) {
+      logger.warn('Cached tx is stale, invalidating and re-preparing', {
+        borrower: borrowerAddress,
+        preparedBlock: borrower.preparedBlockNumber,
+        currentBlock,
+        ttl: config.txCacheTtlBlocks
+      });
+      borrowerRegistry.invalidateCachedTx(borrowerAddress, 'Block TTL exceeded');
+      await prepareLiquidation(borrowerAddress);
+      return;
+    }
+    
+    // Verify oracle HF (final confirmation) - MUST be done before broadcast
+    const oracleHF = await getOracleHealthFactor(provider, borrowerAddress);
+    borrower.oracleHF = oracleHF;
+    
+    logger.info('Oracle HF check before execution', {
+      borrower: borrowerAddress,
+      oracleHF: oracleHF.toFixed(4),
+      liquidatableThreshold: config.hfLiquidatable
+    });
+    
+    if (oracleHF >= 1.0) {
+      logger.warn('Oracle HF >= 1.0, cannot execute (not liquidatable on-chain)', {
+        borrower: borrowerAddress,
+        oracleHF: oracleHF.toFixed(4)
+      });
+      return;
+    }
+    
+    if (oracleHF > config.hfLiquidatable) {
+      logger.warn('Oracle HF above liquidatable threshold, skipping', {
+        borrower: borrowerAddress,
+        oracleHF: oracleHF.toFixed(4),
+        threshold: config.hfLiquidatable
+      });
+      return;
+    }
+    
+    // Verify profitability and gas (hard profit floor)
+    const expectedProfitUsd = borrower.cachedTx.expectedProfitUsd;
+    const estimatedGasUsd = borrower.cachedTx.estimatedGasUsd;
+    const netProfitUsd = expectedProfitUsd - estimatedGasUsd;
+    
+    logger.info('Profit check before execution', {
+      borrower: borrowerAddress,
+      expectedProfitUsd: expectedProfitUsd.toFixed(2),
+      estimatedGasUsd: estimatedGasUsd.toFixed(2),
+      netProfitUsd: netProfitUsd.toFixed(2),
+      minProfitUsd: config.minProfitUsd
+    });
+    
+    // Enforce hard profit floor (net profit after gas must exceed minimum)
+    if (netProfitUsd < config.minProfitUsd) {
+      logger.warn('Net profit below minimum, aborting execution', {
+        borrower: borrowerAddress,
+        expectedProfit: expectedProfitUsd.toFixed(2),
+        gasUsd: estimatedGasUsd.toFixed(2),
+        netProfit: netProfitUsd.toFixed(2),
+        minProfit: config.minProfitUsd,
+        reason: 'Net profit (after gas) < MIN_PROFIT_USD'
+      });
+      return;
+    }
+    
     if (borrower.cachedTx.expectedProfitUsd < config.minProfitUsd) {
-      logger.warn('Profit below minimum, skipping', {
+      logger.warn('Expected profit below minimum, skipping', {
         borrower: borrowerAddress,
         profit: borrower.cachedTx.expectedProfitUsd.toFixed(2),
         minProfit: config.minProfitUsd
@@ -463,6 +545,8 @@ async function executeLiquidation(borrowerAddress: string): Promise<void> {
     logger.info('Executing liquidation', {
       borrower: borrowerAddress,
       expectedProfit: borrower.cachedTx.expectedProfitUsd.toFixed(2),
+      estimatedGas: borrower.cachedTx.estimatedGasUsd.toFixed(2),
+      netProfit: netProfitUsd.toFixed(2),
       oracleHF: oracleHF.toFixed(4)
     });
     
@@ -473,6 +557,17 @@ async function executeLiquidation(borrowerAddress: string): Promise<void> {
     const flashResult = borrower.flashResult;
     
     if (useFlashLoan && flashResult && flashResult.success) {
+      // Log 1inch swap details
+      logger.info('Executing flash liquidation with 1inch swap', {
+        borrower: borrowerAddress,
+        fromAsset: flashResult.collateralAsset,
+        toAsset: flashResult.debtAsset,
+        debtAmount: flashResult.debtAmount.toString(),
+        minAmountOut: flashResult.minAmountOut.toString(),
+        slippageBps: config.maxSlippageBps,
+        oneInchDataLength: flashResult.oneInchData.length
+      });
+      
       // Execute flash liquidation
       const tx = await executeFlashLiquidation(provider, signer, borrowerAddress, flashResult);
       

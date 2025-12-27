@@ -21,8 +21,8 @@ contract FlashLiquidator is IFlashLoanRecipient {
     // Admin/bot address (receives profits)
     address public immutable admin;
     
-    // Swap router for collateral -> debt conversions (configurable)
-    address public swapRouter;
+    // 1inch Router for collateral -> debt conversions
+    address public immutable oneInchRouter;
     
     // Events
     event LiquidationExecuted(
@@ -34,7 +34,13 @@ contract FlashLiquidator is IFlashLoanRecipient {
         uint256 profit
     );
     
-    event SwapRouterUpdated(address indexed oldRouter, address indexed newRouter);
+    event SwapExecuted(
+        address indexed fromAsset,
+        address indexed toAsset,
+        uint256 amountIn,
+        uint256 amountOut,
+        uint256 minAmountOut
+    );
     
     // Errors
     error Unauthorized();
@@ -42,6 +48,8 @@ contract FlashLiquidator is IFlashLoanRecipient {
     error InsufficientProfit();
     error RepaymentFailed();
     error SwapFailed();
+    error InvalidSwapData();
+    error SlippageTooHigh();
     
     // Cached approval tracking to avoid repeated approvals
     mapping(address => mapping(address => bool)) private _approvalCache;
@@ -50,28 +58,16 @@ contract FlashLiquidator is IFlashLoanRecipient {
      * @dev Constructor
      * @param _aavePool Aave V3 Pool address
      * @param _admin Admin address (receives profits)
-     * @param _swapRouter Initial swap router address
+     * @param _oneInchRouter 1inch Router address
      */
-    constructor(address _aavePool, address _admin, address _swapRouter) {
+    constructor(address _aavePool, address _admin, address _oneInchRouter) {
         require(_aavePool != address(0), "Invalid Aave Pool");
         require(_admin != address(0), "Invalid admin");
+        require(_oneInchRouter != address(0), "Invalid 1inch Router");
         
         aavePool = _aavePool;
         admin = _admin;
-        swapRouter = _swapRouter;
-    }
-    
-    /**
-     * @dev Update swap router (only admin)
-     * @param _newRouter New swap router address
-     */
-    function updateSwapRouter(address _newRouter) external {
-        if (msg.sender != admin) revert Unauthorized();
-        
-        address oldRouter = swapRouter;
-        swapRouter = _newRouter;
-        
-        emit SwapRouterUpdated(oldRouter, _newRouter);
+        oneInchRouter = _oneInchRouter;
     }
     
     /**
@@ -80,12 +76,14 @@ contract FlashLiquidator is IFlashLoanRecipient {
      * @param debtAsset Address of the debt asset
      * @param collateralAsset Address of the collateral asset
      * @param debtAmount Amount of debt to cover
+     * @param oneInchData Encoded 1inch swap calldata for collateral->debt swap
      */
     function execute(
         address borrower,
         address debtAsset,
         address collateralAsset,
-        uint256 debtAmount
+        uint256 debtAmount,
+        bytes calldata oneInchData
     ) external {
         // Only admin/bot can execute
         if (msg.sender != admin) revert Unauthorized();
@@ -97,8 +95,8 @@ contract FlashLiquidator is IFlashLoanRecipient {
         uint256[] memory amounts = new uint256[](1);
         amounts[0] = debtAmount;
         
-        // Encode user data for receiveFlashLoan callback
-        bytes memory userData = abi.encode(borrower, debtAsset, collateralAsset, debtAmount);
+        // Encode user data for receiveFlashLoan callback (include 1inch swap data)
+        bytes memory userData = abi.encode(borrower, debtAsset, collateralAsset, debtAmount, oneInchData);
         
         // Request flash loan from Balancer Vault
         IVault(BALANCER_VAULT).flashLoan(
@@ -114,7 +112,7 @@ contract FlashLiquidator is IFlashLoanRecipient {
      * @param tokens Borrowed tokens
      * @param amounts Borrowed amounts
      * @param feeAmounts Flash loan fees
-     * @param userData Encoded liquidation parameters
+     * @param userData Encoded liquidation parameters including 1inch swap data
      */
     function receiveFlashLoan(
         address[] memory tokens,
@@ -125,9 +123,9 @@ contract FlashLiquidator is IFlashLoanRecipient {
         // Only Balancer Vault can call this
         if (msg.sender != BALANCER_VAULT) revert InvalidCaller();
         
-        // Decode parameters
-        (address borrower, address debtAsset, address collateralAsset, uint256 debtAmount) = 
-            abi.decode(userData, (address, address, address, uint256));
+        // Decode parameters (now includes 1inch swap data)
+        (address borrower, address debtAsset, address collateralAsset, uint256 debtAmount, bytes memory oneInchData) = 
+            abi.decode(userData, (address, address, address, uint256, bytes));
         
         // Ensure we received the debt asset
         require(tokens[0] == debtAsset, "Token mismatch");
@@ -153,13 +151,13 @@ contract FlashLiquidator is IFlashLoanRecipient {
         uint256 collateralReceived = IERC20(collateralAsset).balanceOf(address(this)) - collateralBefore;
         require(collateralReceived > 0, "No collateral received");
         
-        // Step 3: Swap collateral -> debt asset to repay flash loan
-        // Note: This is a placeholder. In production, integrate with actual DEX router
+        // Step 3: Swap collateral -> debt asset using 1inch with exact calldata
         uint256 debtAssetAfterSwap = _swapCollateralToDebt(
             collateralAsset,
             debtAsset,
             collateralReceived,
-            totalRepayment
+            totalRepayment,
+            oneInchData
         );
         
         // Ensure we have enough to repay
@@ -186,54 +184,62 @@ contract FlashLiquidator is IFlashLoanRecipient {
     }
     
     /**
-     * @dev Swap collateral to debt asset (placeholder)
+     * @dev Swap collateral to debt asset using 1inch router
      * @param collateralAsset Collateral asset address
      * @param debtAsset Debt asset address
      * @param collateralAmount Amount of collateral to swap
-     * @param minDebtAmount Minimum debt asset required
+     * @param minDebtAmount Minimum debt asset required (including slippage)
+     * @param oneInchData Encoded 1inch swap calldata
      * @return Amount of debt asset received
      */
     function _swapCollateralToDebt(
         address collateralAsset,
         address debtAsset,
         uint256 collateralAmount,
-        uint256 minDebtAmount
+        uint256 minDebtAmount,
+        bytes memory oneInchData
     ) internal returns (uint256) {
-        // IMPORTANT: This is a placeholder implementation
-        // In production, integrate with actual swap router (Uniswap V3, 1inch, etc.)
+        // Validate 1inch data is provided
+        if (oneInchData.length == 0) revert InvalidSwapData();
         
-        if (swapRouter == address(0)) {
-            // No router configured - revert with clear message
-            revert SwapFailed();
-        }
+        // Get decimals for safe calculation
+        uint8 collateralDecimals = IERC20(collateralAsset).decimals();
+        uint8 debtDecimals = IERC20(debtAsset).decimals();
         
-        // Approve router to spend collateral
-        _ensureApproval(IERC20(collateralAsset), swapRouter);
+        // Record debt balance before swap
+        uint256 debtBalanceBefore = IERC20(debtAsset).balanceOf(address(this));
         
-        // NOTE: Actual swap integration should be added here
-        // Example for Uniswap V3:
-        // ISwapRouter.ExactInputSingleParams memory params = ISwapRouter.ExactInputSingleParams({
-        //     tokenIn: collateralAsset,
-        //     tokenOut: debtAsset,
-        //     fee: 3000, // 0.3%
-        //     recipient: address(this),
-        //     deadline: block.timestamp,
-        //     amountIn: collateralAmount,
-        //     amountOutMinimum: minDebtAmount,
-        //     sqrtPriceLimitX96: 0
-        // });
-        // uint256 amountOut = ISwapRouter(swapRouter).exactInputSingle(params);
+        // Approve 1inch router to spend collateral
+        _ensureApproval(IERC20(collateralAsset), oneInchRouter);
         
-        // For now, check if we already have enough debt asset
-        // (This assumes debt was obtained through other means, e.g., pre-funded or same-token liquidation)
-        uint256 debtBalance = IERC20(debtAsset).balanceOf(address(this));
+        // Execute 1inch swap via low-level call
+        // The oneInchData contains the complete encoded function call including:
+        // - swap function selector
+        // - all swap parameters (tokenIn, tokenOut, amount, minReturn, etc.)
+        (bool success, ) = oneInchRouter.call(oneInchData);
         
-        if (debtBalance < minDebtAmount) {
-            // If swap router is configured, this indicates swap integration is incomplete
-            revert SwapFailed();
-        }
+        if (!success) revert SwapFailed();
         
-        return debtBalance;
+        // Calculate received debt asset
+        uint256 debtBalanceAfter = IERC20(debtAsset).balanceOf(address(this));
+        
+        // This should never underflow as swap should increase balance
+        require(debtBalanceAfter >= debtBalanceBefore, "Swap decreased balance");
+        uint256 amountOut = debtBalanceAfter - debtBalanceBefore;
+        
+        // Enforce minimum output (slippage protection)
+        if (amountOut < minDebtAmount) revert SlippageTooHigh();
+        
+        // Emit swap event for transparency
+        emit SwapExecuted(
+            collateralAsset,
+            debtAsset,
+            collateralAmount,
+            amountOut,
+            minDebtAmount
+        );
+        
+        return debtBalanceAfter;
     }
     
     /**
