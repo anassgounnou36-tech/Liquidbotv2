@@ -251,7 +251,9 @@ export async function getTotalDebtUSD(
       continue;
     }
     
-    // Get decimals for the asset using address with cached fallback (never throws)
+    // Get decimals for the asset using address with cached fallback
+    // While the cached function has robust error handling, we wrap in try-catch
+    // as defensive coding to handle any unexpected issues and continue processing
     const assetAddress = getTokenAddress(debtBalance.asset);
     
     try {
@@ -259,7 +261,7 @@ export async function getTotalDebtUSD(
       const amount = Number(debtBalance.amount) / Math.pow(10, decimals);
       totalDebtUSD += amount * price;
     } catch (error) {
-      logger.warn('Failed to get decimals for asset, skipping in debt calculation', { 
+      logger.warn('Unexpected error getting decimals, skipping asset in debt calculation', { 
         asset: debtBalance.asset, 
         address: assetAddress, 
         error 

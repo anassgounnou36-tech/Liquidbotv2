@@ -26,7 +26,13 @@ class DecimalsCache {
   private cache: Map<string, number> = new Map();
   private failedAddresses: Set<string> = new Set();
   
-  // Get decimals with fallback to known-safe defaults
+  /**
+   * Get decimals for a token with comprehensive error handling and fallback
+   * @param provider - ethers JsonRpcProvider for RPC calls
+   * @param address - Token contract address (checksummed or lowercase)
+   * @returns Number of decimals (6 for USDC, 18 for most tokens)
+   * @remarks This function always returns a valid value, falling back to defaults on error
+   */
   async getDecimals(provider: ethers.JsonRpcProvider, address: string): Promise<number> {
     const normalizedAddress = address.toLowerCase();
     
@@ -92,9 +98,15 @@ export function getTokenDecimalsSync(symbol: string): number {
   return TOKEN_DECIMALS[symbol] || 18; // Default to 18 decimals if unknown
 }
 
-// Get token decimals by address using cache with robust fallback
-// This function has comprehensive error handling and will always return a valid decimal value
-// Falls back to 18 decimals in worst case. Suitable for use in critical paths.
+/**
+ * Get token decimals by address using cache with robust fallback
+ * @param provider - ethers JsonRpcProvider for RPC calls
+ * @param address - Token contract address (checksummed or lowercase)
+ * @returns Number of decimals (6 for USDC, 18 for most tokens)
+ * @remarks Has comprehensive error handling and will always return a valid decimal value.
+ * Falls back to known-safe defaults (USDC=6, WETH=18, cbETH=18) or 18 in worst case.
+ * Suitable for use in critical paths where errors must not propagate.
+ */
 export async function getTokenDecimalsByAddressCached(
   provider: ethers.JsonRpcProvider,
   address: string
