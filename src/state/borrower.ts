@@ -49,6 +49,7 @@ export interface Borrower {
   
   // Cached transaction (for CRITICAL state)
   cachedTx?: CachedTransaction;
+  preparedBlockNumber?: number; // Block number when tx was prepared (for TTL tracking)
   
   // Flash liquidation result (for flash loan mode)
   flashResult?: {
@@ -59,6 +60,8 @@ export interface Borrower {
     expectedProfit: number;
     gasEstimate: bigint;
     gasUsd: number;
+    oneInchData: string; // 1inch swap calldata
+    minAmountOut: bigint; // Minimum amount out from swap (with slippage)
     error?: string;
   };
   

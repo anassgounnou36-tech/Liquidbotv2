@@ -190,7 +190,61 @@ export class PriceAggregator extends EventEmitter {
     return this.binanceConnected || this.pythConnected;
   }
   
-  // Get price staleness info
+  // Check if execution should be allowed based on price feed policy
+  // Policy: Binance OR Pyth must be live (fail-closed)
+  canExecuteLiquidation(priceStaleMs: number): { allowed: boolean; reason?: string } {
+    const now = Date.now();
+    
+    // Check if Binance is live (connected and not stale)
+    const binanceLive = this.binanceConnected && 
+                        this.lastBinanceUpdate > 0 && 
+                        (now - this.lastBinanceUpdate <= priceStaleMs);
+    
+    // Check if Pyth is live (connected and not stale)
+    const pythLive = this.pythConnected && 
+                     this.lastPythUpdate > 0 && 
+                     (now - this.lastPythUpdate <= priceStaleMs);
+    
+    // At least one feed must be live
+    if (binanceLive || pythLive) {
+      return { allowed: true };
+    }
+    
+    // Both feeds are down or stale - fail closed
+    return {
+      allowed: false,
+      reason: `Both price feeds are stale or disconnected. Binance: ${binanceLive ? 'live' : 'stale/down'}, Pyth: ${pythLive ? 'live' : 'stale/down'}`
+    };
+  }
+  
+  // Get detailed feed status for each source
+  getFeedStatus(priceStaleMs: number): {
+    binance: { connected: boolean; live: boolean; ageMs: number };
+    pyth: { connected: boolean; live: boolean; ageMs: number };
+  } {
+    const now = Date.now();
+    
+    const binanceAge = this.lastBinanceUpdate > 0 ? now - this.lastBinanceUpdate : -1;
+    const binanceLive = this.binanceConnected && binanceAge >= 0 && binanceAge <= priceStaleMs;
+    
+    const pythAge = this.lastPythUpdate > 0 ? now - this.lastPythUpdate : -1;
+    const pythLive = this.pythConnected && pythAge >= 0 && pythAge <= priceStaleMs;
+    
+    return {
+      binance: {
+        connected: this.binanceConnected,
+        live: binanceLive,
+        ageMs: binanceAge
+      },
+      pyth: {
+        connected: this.pythConnected,
+        live: pythLive,
+        ageMs: pythAge
+      }
+    };
+  }
+  
+  // Get price staleness info (kept for backward compatibility)
   getStalenessInfo(): {
     binanceAge: number;
     pythAge: number;

@@ -4,12 +4,12 @@ import { getConfig } from '../config/env';
 import { getAssetAddress } from '../aave/addresses';
 import { estimateLiquidation } from '../hf/calc';
 import { priceAggregator } from '../prices';
+import { build1inchSwapData } from './oneinch';
 import logger from '../logging/logger';
 
 // FlashLiquidator ABI (minimal)
 const FLASH_LIQUIDATOR_ABI = [
-  'function execute(address borrower, address debtAsset, address collateralAsset, uint256 debtAmount) external',
-  'function updateSwapRouter(address _newRouter) external',
+  'function execute(address borrower, address debtAsset, address collateralAsset, uint256 debtAmount, bytes calldata oneInchData) external',
   'function emergencyWithdraw(address token) external',
   'function getDecimals(address asset) external view returns (uint8)'
 ];
@@ -23,6 +23,8 @@ export interface FlashLiquidationResult {
   expectedProfit: number;
   gasEstimate: bigint;
   gasUsd: number;
+  oneInchData: string; // 1inch swap calldata
+  minAmountOut: bigint; // Minimum amount out from swap (with slippage)
   error?: string;
 }
 
@@ -72,6 +74,8 @@ export async function simulateFlashLiquidation(
         expectedProfit: 0,
         gasEstimate: 0n,
         gasUsd: 0,
+        oneInchData: '0x',
+        minAmountOut: 0n,
         error: 'No profitable liquidation found'
       };
     }
@@ -79,6 +83,45 @@ export async function simulateFlashLiquidation(
     // Get asset addresses
     const debtAssetAddress = getAssetAddress(bestDebtAsset);
     const collateralAssetAddress = getAssetAddress(bestCollateralAsset);
+    
+    // Build 1inch swap data for collateral -> debt swap
+    const oneInchSwap = await build1inchSwapData(
+      collateralAssetAddress,
+      debtAssetAddress,
+      bestEstimate.collateralAmount,
+      config.flashLiquidatorAddress,
+      provider
+    );
+    
+    if (!oneInchSwap) {
+      logger.error('Failed to build 1inch swap data', {
+        borrower: borrower.address,
+        collateralAsset: bestCollateralAsset,
+        debtAsset: bestDebtAsset
+      });
+      return {
+        success: false,
+        debtAsset: bestDebtAsset,
+        collateralAsset: bestCollateralAsset,
+        debtAmount: bestEstimate.debtAmount,
+        expectedProfit: 0,
+        gasEstimate: 0n,
+        gasUsd: 0,
+        oneInchData: '0x',
+        minAmountOut: 0n,
+        error: 'Failed to build 1inch swap data'
+      };
+    }
+    
+    logger.info('1inch swap data built', {
+      borrower: borrower.address,
+      fromAsset: bestCollateralAsset,
+      toAsset: bestDebtAsset,
+      amountIn: bestEstimate.collateralAmount.toString(),
+      estimatedOut: oneInchSwap.estimatedOut.toString(),
+      minAmountOut: oneInchSwap.minAmountOut.toString(),
+      slippageBps: config.maxSlippageBps
+    });
     
     // Create FlashLiquidator contract instance
     const flashLiquidator = new ethers.Contract(
@@ -94,7 +137,8 @@ export async function simulateFlashLiquidation(
         borrower.address,
         debtAssetAddress,
         collateralAssetAddress,
-        bestEstimate.debtAmount
+        bestEstimate.debtAmount,
+        oneInchSwap.calldata
       );
       
       // If we get here, simulation succeeded
@@ -120,6 +164,8 @@ export async function simulateFlashLiquidation(
         expectedProfit: bestEstimate.profitUsd,
         gasEstimate: 0n,
         gasUsd: 0,
+        oneInchData: oneInchSwap.calldata,
+        minAmountOut: oneInchSwap.minAmountOut,
         error: `Simulation failed: ${simError.reason || simError.message}`
       };
     }
@@ -129,7 +175,8 @@ export async function simulateFlashLiquidation(
       borrower.address,
       debtAssetAddress,
       collateralAssetAddress,
-      bestEstimate.debtAmount
+      bestEstimate.debtAmount,
+      oneInchSwap.calldata
     );
     
     // Get current base fee
@@ -150,6 +197,8 @@ export async function simulateFlashLiquidation(
         expectedProfit: bestEstimate.profitUsd,
         gasEstimate,
         gasUsd,
+        oneInchData: oneInchSwap.calldata,
+        minAmountOut: oneInchSwap.minAmountOut,
         error: `Profit too low: $${bestEstimate.profitUsd.toFixed(2)} < $${config.minProfitUsd}`
       };
     }
@@ -164,6 +213,8 @@ export async function simulateFlashLiquidation(
         expectedProfit: bestEstimate.profitUsd,
         gasEstimate,
         gasUsd,
+        oneInchData: oneInchSwap.calldata,
+        minAmountOut: oneInchSwap.minAmountOut,
         error: `Gas too high: $${gasUsd.toFixed(2)} > $${config.maxGasUsd}`
       };
     }
@@ -175,7 +226,9 @@ export async function simulateFlashLiquidation(
       debtAmount: bestEstimate.debtAmount,
       expectedProfit: bestEstimate.profitUsd,
       gasEstimate,
-      gasUsd
+      gasUsd,
+      oneInchData: oneInchSwap.calldata,
+      minAmountOut: oneInchSwap.minAmountOut
     };
   } catch (error: any) {
     logger.error('Flash liquidation simulation error', {
@@ -191,6 +244,8 @@ export async function simulateFlashLiquidation(
       expectedProfit: 0,
       gasEstimate: 0n,
       gasUsd: 0,
+      oneInchData: '0x',
+      minAmountOut: 0n,
       error: error.message
     };
   }
@@ -229,12 +284,13 @@ export async function buildFlashLiquidationTx(
       signer
     );
     
-    // Build transaction data with actual borrower address
+    // Build transaction data with actual borrower address and 1inch calldata
     const data = flashLiquidator.interface.encodeFunctionData('execute', [
       borrowerAddress,
       debtAssetAddress,
       collateralAssetAddress,
-      flashResult.debtAmount
+      flashResult.debtAmount,
+      flashResult.oneInchData
     ]);
     
     // Get fee data
@@ -313,6 +369,7 @@ export async function executeFlashLiquidation(
       debtAssetAddress,
       collateralAssetAddress,
       flashResult.debtAmount,
+      flashResult.oneInchData,
       {
         gasLimit,
         maxFeePerGas: feeData.maxFeePerGas,
