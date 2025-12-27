@@ -110,37 +110,45 @@ export class AaveEventListener extends EventEmitter {
     let borrower = borrowerRegistry.getBorrower(onBehalfOf);
     const isNew = !borrower;
     
-    // Add borrower to registry if not exists (hydrated=true when added via events)
+    // Add borrower to registry if not exists (start as NOT hydrated)
     if (!borrower) {
-      borrower = borrowerRegistry.addBorrower(onBehalfOf, BorrowerState.SAFE, true);
+      borrower = borrowerRegistry.addBorrower(onBehalfOf, BorrowerState.SAFE, false);
     }
     
     // Update cached balances
     await this.updateBorrowerBalances(onBehalfOf);
     
-    // Mark as hydrated after successful balance update
+    // Mark as hydrated ONLY after successful balance update
     borrowerRegistry.markBorrowerHydrated(onBehalfOf);
     
     // For new borrowers, check MIN_DEBT_USD threshold
     if (isNew) {
-      const totalDebtUSD = await getTotalDebtUSD(this.provider, borrower);
-      
-      if (totalDebtUSD < config.minDebtUsd) {
-        logger.info('Skipping new borrower: debt below MIN_DEBT_USD', {
+      try {
+        const totalDebtUSD = await getTotalDebtUSD(this.provider, borrower);
+        
+        if (totalDebtUSD < config.minDebtUsd) {
+          logger.info('Skipping new borrower: debt below MIN_DEBT_USD', {
+            user: onBehalfOf,
+            totalDebtUSD: totalDebtUSD.toFixed(2),
+            minDebtUsd: config.minDebtUsd
+          });
+          // Remove from registry - only valid for new borrowers below threshold
+          borrowerRegistry.removeBorrower(onBehalfOf);
+          return;
+        }
+        
+        logger.info('New borrower added: meets MIN_DEBT_USD threshold', {
           user: onBehalfOf,
           totalDebtUSD: totalDebtUSD.toFixed(2),
           minDebtUsd: config.minDebtUsd
         });
-        // Remove from registry
-        borrowerRegistry.removeBorrower(onBehalfOf);
-        return;
+      } catch (error) {
+        logger.warn('Failed to compute debt for new borrower, keeping in registry', {
+          user: onBehalfOf,
+          error
+        });
+        // Do NOT remove - transient error, keep borrower
       }
-      
-      logger.info('New borrower added: meets MIN_DEBT_USD threshold', {
-        user: onBehalfOf,
-        totalDebtUSD: totalDebtUSD.toFixed(2),
-        minDebtUsd: config.minDebtUsd
-      });
     }
     
     // Mark as updated
@@ -354,26 +362,34 @@ Candidates Total: ${stats.total}`;
     
     // For new borrowers, check if they have debt first
     if (isNew) {
-      borrower = borrowerRegistry.addBorrower(onBehalfOf, BorrowerState.SAFE, true);
+      borrower = borrowerRegistry.addBorrower(onBehalfOf, BorrowerState.SAFE, false);
       
       // Update cached balances
       await this.updateBorrowerBalances(onBehalfOf);
       
-      // Mark as hydrated after successful balance update
+      // Mark as hydrated ONLY after successful balance update
       borrowerRegistry.markBorrowerHydrated(onBehalfOf);
       
       // Check MIN_DEBT_USD threshold
-      const totalDebtUSD = await getTotalDebtUSD(this.provider, borrower);
-      
-      if (totalDebtUSD < config.minDebtUsd) {
-        logger.debug('Skipping new borrower on Supply: debt below MIN_DEBT_USD', {
+      try {
+        const totalDebtUSD = await getTotalDebtUSD(this.provider, borrower);
+        
+        if (totalDebtUSD < config.minDebtUsd) {
+          logger.debug('Skipping new borrower on Supply: debt below MIN_DEBT_USD', {
+            user: onBehalfOf,
+            totalDebtUSD: totalDebtUSD.toFixed(2),
+            minDebtUsd: config.minDebtUsd
+          });
+          // Remove from registry - only valid for new borrowers below threshold
+          borrowerRegistry.removeBorrower(onBehalfOf);
+          return;
+        }
+      } catch (error) {
+        logger.warn('Failed to compute debt for new borrower on Supply, keeping in registry', {
           user: onBehalfOf,
-          totalDebtUSD: totalDebtUSD.toFixed(2),
-          minDebtUsd: config.minDebtUsd
+          error
         });
-        // Remove from registry
-        borrowerRegistry.removeBorrower(onBehalfOf);
-        return;
+        // Do NOT remove - transient error, keep borrower
       }
     } else {
       // Update cached balances
@@ -413,26 +429,34 @@ Candidates Total: ${stats.total}`;
     
     // For new borrowers, check if they have debt first
     if (isNew) {
-      borrower = borrowerRegistry.addBorrower(user, BorrowerState.SAFE, true);
+      borrower = borrowerRegistry.addBorrower(user, BorrowerState.SAFE, false);
       
       // Update cached balances
       await this.updateBorrowerBalances(user);
       
-      // Mark as hydrated after successful balance update
+      // Mark as hydrated ONLY after successful balance update
       borrowerRegistry.markBorrowerHydrated(user);
       
       // Check MIN_DEBT_USD threshold
-      const totalDebtUSD = await getTotalDebtUSD(this.provider, borrower);
-      
-      if (totalDebtUSD < config.minDebtUsd) {
-        logger.debug('Skipping new borrower on Withdraw: debt below MIN_DEBT_USD', {
+      try {
+        const totalDebtUSD = await getTotalDebtUSD(this.provider, borrower);
+        
+        if (totalDebtUSD < config.minDebtUsd) {
+          logger.debug('Skipping new borrower on Withdraw: debt below MIN_DEBT_USD', {
+            user,
+            totalDebtUSD: totalDebtUSD.toFixed(2),
+            minDebtUsd: config.minDebtUsd
+          });
+          // Remove from registry - only valid for new borrowers below threshold
+          borrowerRegistry.removeBorrower(user);
+          return;
+        }
+      } catch (error) {
+        logger.warn('Failed to compute debt for new borrower on Withdraw, keeping in registry', {
           user,
-          totalDebtUSD: totalDebtUSD.toFixed(2),
-          minDebtUsd: config.minDebtUsd
+          error
         });
-        // Remove from registry
-        borrowerRegistry.removeBorrower(user);
-        return;
+        // Do NOT remove - transient error, keep borrower
       }
     } else {
       // Update cached balances

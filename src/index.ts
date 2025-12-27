@@ -116,18 +116,18 @@ async function seedBorrowersOnce(): Promise<void> {
         const totalDebtUSD = await getTotalDebtUSD(provider, borrower);
         
         if (totalDebtUSD < config.minDebtUsd) {
-          // Remove from registry
+          // Remove from registry - below threshold
           borrowerRegistry.removeBorrower(borrowerAddress);
           filteredCount++;
         } else {
           addedCount++;
         }
       } catch (error) {
-        logger.error('Error processing borrower in seed scan', {
+        logger.warn('Error processing borrower in seed scan, skipping', {
           borrower: borrowerAddress,
           error
         });
-        // Remove on error - but log as warning, don't throw
+        // Remove on error but don't throw - skip and continue
         borrowerRegistry.removeBorrower(borrowerAddress);
       }
     }

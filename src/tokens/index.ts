@@ -21,9 +21,79 @@ export const TOKEN_DECIMALS: Record<string, number> = {
   'GHO': 18
 };
 
+// Decimals cache to memoize decimals per token address and provide robust fallback
+class DecimalsCache {
+  private cache: Map<string, number> = new Map();
+  private failedAddresses: Set<string> = new Set();
+  
+  // Get decimals with fallback to known-safe defaults
+  async getDecimals(provider: ethers.JsonRpcProvider, address: string): Promise<number> {
+    const normalizedAddress = address.toLowerCase();
+    
+    // Return cached value if available
+    if (this.cache.has(normalizedAddress)) {
+      return this.cache.get(normalizedAddress)!;
+    }
+    
+    // Try to fetch from chain
+    try {
+      const ERC20_ABI = ['function decimals() external view returns (uint8)'];
+      const tokenContract = new ethers.Contract(address, ERC20_ABI, provider);
+      const decimals = await tokenContract.decimals();
+      const decimalValue = Number(decimals);
+      
+      // Cache and return
+      this.cache.set(normalizedAddress, decimalValue);
+      return decimalValue;
+    } catch (error) {
+      // Log once for first failure
+      if (!this.failedAddresses.has(normalizedAddress)) {
+        logger.warn('Failed to fetch decimals from chain, using fallback', {
+          address,
+          error: error instanceof Error ? error.message : String(error)
+        });
+        this.failedAddresses.add(normalizedAddress);
+      }
+      
+      // Fallback to known-safe defaults based on token symbol lookup
+      const symbol = getTokenSymbol(address);
+      let fallbackDecimals = 18; // Default fallback
+      
+      if (symbol && TOKEN_DECIMALS[symbol]) {
+        fallbackDecimals = TOKEN_DECIMALS[symbol];
+        logger.debug('Using known decimals for symbol', { address, symbol, decimals: fallbackDecimals });
+      } else {
+        logger.debug('Using default 18 decimals', { address });
+      }
+      
+      // Cache the fallback value
+      this.cache.set(normalizedAddress, fallbackDecimals);
+      return fallbackDecimals;
+    }
+  }
+  
+  // Clear cache (for testing)
+  clear(): void {
+    this.cache.clear();
+    this.failedAddresses.clear();
+  }
+}
+
+// Singleton instance
+const decimalsCache = new DecimalsCache();
+
 // Get token decimals (synchronous, from catalog)
 export function getTokenDecimalsSync(symbol: string): number {
   return TOKEN_DECIMALS[symbol] || 18; // Default to 18 decimals if unknown
+}
+
+// Get token decimals by address using cache with robust fallback
+// This function NEVER throws and NEVER causes borrower removal
+export async function getTokenDecimalsByAddressCached(
+  provider: ethers.JsonRpcProvider,
+  address: string
+): Promise<number> {
+  return decimalsCache.getDecimals(provider, address);
 }
 
 // Get token address from catalog by symbol
@@ -42,34 +112,21 @@ export function getTokenAddress(symbol: string): string {
   }
 }
 
-// Get token decimals by symbol (async)
+// Get token decimals by symbol (async) - uses cache with robust fallback
 export async function getTokenDecimals(
   provider: ethers.JsonRpcProvider,
   symbol: string
 ): Promise<number> {
-  try {
-    const address = getTokenAddress(symbol);
-    return await getTokenDecimalsByAddress(provider, address);
-  } catch (error) {
-    logger.error('Failed to get decimals for token', { symbol, error });
-    throw error;
-  }
+  const address = getTokenAddress(symbol);
+  return await getTokenDecimalsByAddressCached(provider, address);
 }
 
-// Get token decimals by address (async)
+// Get token decimals by address (async) - LEGACY, prefer getTokenDecimalsByAddressCached
 export async function getTokenDecimalsByAddress(
   provider: ethers.JsonRpcProvider,
   address: string
 ): Promise<number> {
-  try {
-    const ERC20_ABI = ['function decimals() external view returns (uint8)'];
-    const tokenContract = new ethers.Contract(address, ERC20_ABI, provider);
-    const decimals = await tokenContract.decimals();
-    return Number(decimals);
-  } catch (error) {
-    logger.error('Failed to get decimals for asset address', { address, error });
-    throw error;
-  }
+  return await getTokenDecimalsByAddressCached(provider, address);
 }
 
 // Get all token addresses from catalog
