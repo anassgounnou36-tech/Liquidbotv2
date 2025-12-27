@@ -1,7 +1,8 @@
 import { ethers } from 'ethers';
 import { EventEmitter } from 'events';
 import { getConfig } from '../config/env';
-import { getAaveAddresses, AAVE_POOL_ABI, ERC20_ABI, getAssetAddress } from './addresses';
+import { getAaveAddresses, AAVE_POOL_ABI, ERC20_ABI } from './addresses';
+import { getTokenAddress } from '../tokens';
 import { borrowerRegistry } from '../state/registry';
 import { BorrowerState, BorrowerBalance } from '../state/borrower';
 import { getTotalDebtUSD, getOracleHealthFactor } from '../execution/sim';
@@ -109,13 +110,16 @@ export class AaveEventListener extends EventEmitter {
     let borrower = borrowerRegistry.getBorrower(onBehalfOf);
     const isNew = !borrower;
     
-    // Add borrower to registry if not exists (temporarily)
+    // Add borrower to registry if not exists (hydrated=true when added via events)
     if (!borrower) {
-      borrower = borrowerRegistry.addBorrower(onBehalfOf, BorrowerState.SAFE);
+      borrower = borrowerRegistry.addBorrower(onBehalfOf, BorrowerState.SAFE, true);
     }
     
     // Update cached balances
     await this.updateBorrowerBalances(onBehalfOf);
+    
+    // Mark as hydrated after successful balance update
+    borrowerRegistry.markBorrowerHydrated(onBehalfOf);
     
     // For new borrowers, check MIN_DEBT_USD threshold
     if (isNew) {
@@ -161,8 +165,18 @@ export class AaveEventListener extends EventEmitter {
       blockNumber: event.blockNumber
     });
     
+    // Only process if borrower exists
+    const borrower = borrowerRegistry.getBorrower(user);
+    if (!borrower) {
+      logger.debug('Repay event for unknown borrower, skipping', { user });
+      return;
+    }
+    
     // Update cached balances
     await this.updateBorrowerBalances(user);
+    
+    // Mark as hydrated after successful balance update
+    borrowerRegistry.markBorrowerHydrated(user);
     
     // Mark as updated
     borrowerRegistry.markBorrowerUpdated(user);
@@ -340,10 +354,13 @@ Candidates Total: ${stats.total}`;
     
     // For new borrowers, check if they have debt first
     if (isNew) {
-      borrower = borrowerRegistry.addBorrower(onBehalfOf, BorrowerState.SAFE);
+      borrower = borrowerRegistry.addBorrower(onBehalfOf, BorrowerState.SAFE, true);
       
       // Update cached balances
       await this.updateBorrowerBalances(onBehalfOf);
+      
+      // Mark as hydrated after successful balance update
+      borrowerRegistry.markBorrowerHydrated(onBehalfOf);
       
       // Check MIN_DEBT_USD threshold
       const totalDebtUSD = await getTotalDebtUSD(this.provider, borrower);
@@ -361,6 +378,9 @@ Candidates Total: ${stats.total}`;
     } else {
       // Update cached balances
       await this.updateBorrowerBalances(onBehalfOf);
+      
+      // Mark as hydrated after successful balance update
+      borrowerRegistry.markBorrowerHydrated(onBehalfOf);
     }
     
     // Mark as updated
@@ -393,10 +413,13 @@ Candidates Total: ${stats.total}`;
     
     // For new borrowers, check if they have debt first
     if (isNew) {
-      borrower = borrowerRegistry.addBorrower(user, BorrowerState.SAFE);
+      borrower = borrowerRegistry.addBorrower(user, BorrowerState.SAFE, true);
       
       // Update cached balances
       await this.updateBorrowerBalances(user);
+      
+      // Mark as hydrated after successful balance update
+      borrowerRegistry.markBorrowerHydrated(user);
       
       // Check MIN_DEBT_USD threshold
       const totalDebtUSD = await getTotalDebtUSD(this.provider, borrower);
@@ -414,6 +437,9 @@ Candidates Total: ${stats.total}`;
     } else {
       // Update cached balances
       await this.updateBorrowerBalances(user);
+      
+      // Mark as hydrated after successful balance update
+      borrowerRegistry.markBorrowerHydrated(user);
     }
     
     // Mark as updated
@@ -427,7 +453,8 @@ Candidates Total: ${stats.total}`;
   private async updateBorrowerBalances(userAddress: string): Promise<void> {
     const borrower = borrowerRegistry.getBorrower(userAddress);
     if (!borrower) {
-      logger.warn('Attempted to update balances for unknown borrower', { userAddress });
+      // Skip silently - borrower should have been added before calling this
+      logger.debug('Skipping balance update for non-existent borrower', { userAddress });
       return;
     }
     
@@ -437,7 +464,7 @@ Candidates Total: ${stats.total}`;
     const collateralBalances: BorrowerBalance[] = [];
     for (const asset of config.targetCollateralAssets) {
       try {
-        const assetAddress = getAssetAddress(asset);
+        const assetAddress = getTokenAddress(asset);
         const balance = await this.getCollateralBalance(userAddress, assetAddress);
         
         if (balance > 0n) {
@@ -456,7 +483,7 @@ Candidates Total: ${stats.total}`;
     const debtBalances: BorrowerBalance[] = [];
     for (const asset of config.targetDebtAssets) {
       try {
-        const assetAddress = getAssetAddress(asset);
+        const assetAddress = getTokenAddress(asset);
         const balance = await this.getDebtBalance(userAddress, assetAddress);
         
         if (balance > 0n) {

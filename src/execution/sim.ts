@@ -1,6 +1,7 @@
 import { ethers } from 'ethers';
 import { Borrower } from '../state/borrower';
-import { getAaveAddresses, AAVE_POOL_ABI, AAVE_ORACLE_ABI, getAssetAddress } from '../aave/addresses';
+import { getAaveAddresses, AAVE_POOL_ABI, AAVE_ORACLE_ABI } from '../aave/addresses';
+import { getTokenAddress } from '../tokens';
 import { estimateLiquidation } from '../hf/calc';
 import { priceAggregator } from '../prices';
 import { getConfig } from '../config/env';
@@ -73,8 +74,8 @@ export async function simulateLiquidation(
     }
     
     // Get asset addresses
-    const debtAssetAddress = getAssetAddress(bestDebtAsset);
-    const collateralAssetAddress = getAssetAddress(bestCollateralAsset);
+    const debtAssetAddress = getTokenAddress(bestDebtAsset);
+    const collateralAssetAddress = getTokenAddress(bestCollateralAsset);
     
     // Verify oracle HF first
     const oracleHF = await getOracleHealthFactor(provider, borrower.address);
@@ -211,7 +212,7 @@ export async function getOraclePrices(
   );
   
   try {
-    const assetAddresses = assets.map(asset => getAssetAddress(asset));
+    const assetAddresses = assets.map(asset => getTokenAddress(asset));
     const oraclePrices = await oracleContract.getAssetsPrices(assetAddresses);
     
     for (let i = 0; i < assets.length; i++) {
@@ -250,8 +251,8 @@ export async function getTotalDebtUSD(
       continue;
     }
     
-    // Get decimals for the asset
-    const assetAddress = getAssetAddress(debtBalance.asset);
+    // Get decimals for the asset using address
+    const assetAddress = getTokenAddress(debtBalance.asset);
     const ERC20_ABI = ['function decimals() external view returns (uint8)'];
     const tokenContract = new ethers.Contract(assetAddress, ERC20_ABI, provider);
     
@@ -260,7 +261,7 @@ export async function getTotalDebtUSD(
       const amount = Number(debtBalance.amount) / Math.pow(10, decimals);
       totalDebtUSD += amount * price;
     } catch (error) {
-      logger.error('Failed to get decimals for asset', { asset: debtBalance.asset, error });
+      logger.error('Failed to get decimals for asset address', { asset: debtBalance.asset, address: assetAddress, error });
     }
   }
   

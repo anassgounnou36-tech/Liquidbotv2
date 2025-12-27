@@ -13,14 +13,14 @@ class BorrowerRegistry {
   }
   
   // Add or update borrower
-  addBorrower(address: string, state: BorrowerState = BorrowerState.SAFE): Borrower {
+  addBorrower(address: string, state: BorrowerState = BorrowerState.SAFE, hydrated: boolean = true): Borrower {
     const key = address.toLowerCase();
     let borrower = this.borrowers.get(key);
     
     if (!borrower) {
-      borrower = createBorrower(address, state);
+      borrower = createBorrower(address, state, hydrated);
       this.borrowers.set(key, borrower);
-      logger.info('Borrower added to registry', { address, state });
+      logger.info('Borrower added to registry', { address, state, hydrated });
     }
     
     return borrower;
@@ -157,6 +157,16 @@ class BorrowerRegistry {
     if (borrower) {
       borrower.lastEventAt = Date.now();
       borrower.lastUpdatedAt = Date.now();
+    }
+  }
+  
+  // Mark borrower as hydrated (balances updated via events)
+  markBorrowerHydrated(address: string): void {
+    const borrower = this.getBorrower(address);
+    if (borrower && !borrower.hydrated) {
+      borrower.hydrated = true;
+      borrower.firstHydratedAt = Date.now();
+      logger.info('Borrower hydrated', { address, firstHydratedAt: borrower.firstHydratedAt });
     }
   }
   

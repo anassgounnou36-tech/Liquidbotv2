@@ -46,9 +46,10 @@ SAFE → WATCH → CRITICAL → LIQUIDATABLE
 1. **Startup Seed Scan**: One-time historical scan at startup to discover existing borrowers
    - Scans Borrow events over configurable lookback period (default: 100,000 blocks)
    - Filters borrowers by MIN_DEBT_USD threshold using oracle prices
-   - Implements candidate cap with early stop at ≥80% progress
+   - Implements candidate cap with **immediate early stop** when MAX_CANDIDATES is reached
    - Progress reporting at 20%, 40%, 60%, 80%, 100%
    - Runs once before block loop starts
+   - Seeded borrowers are marked as **not hydrated** until first Aave event updates their balances
 2. **Flash Liquidator Contract**: Solidity contract using Balancer V2 flash loans for zero-capital liquidations
 3. **Price Feeds**: Binance WebSocket + Pyth WebSocket for real-time prices with staleness detection
 4. **Event Listeners**: Monitor Borrow, Repay, Liquidation events from Aave with MIN_DEBT_USD filtering
@@ -56,6 +57,70 @@ SAFE → WATCH → CRITICAL → LIQUIDATABLE
 6. **Execution Engine**: Simulate (with callStatic), verify, and execute liquidations
 7. **Borrower Mutex**: Prevents concurrent preparation/execution for the same borrower
 8. **Liquidation Audit**: Diagnostics for missed liquidations with reason classification and Telegram alerts
+
+### Token Catalog
+
+The bot uses a static token catalog (`src/tokens/base.json`) to maintain Base mainnet token addresses outside of `.env` files:
+
+```json
+{
+  "USDC": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+  "cbBTC": "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf",
+  "weETH": "0x04C0599Ae5A44757c0af6F9eC3b93da8976c150A",
+  "wstETH": "0xc1CBa3fCea344f92D9239c08C0568f6F2F0ee452",
+  "EURC": "0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42",
+  "cbETH": "0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22",
+  "GHO": "0x6Bb7a212910682DCFdbd5BCBb3e28FB4E8da10Ee",
+  "WETH": "0x4200000000000000000000000000000000000006"
+}
+```
+
+**Benefits:**
+- Centralized token address management
+- Easy to add new tokens for future expansion
+- Type-safe lookups via `getTokenAddress(symbol)` helper
+- Prevents "symbol vs address" errors in ERC20 and oracle calls
+- Falls back to `src/aave/addresses.ts` for backward compatibility
+
+**Usage:**
+```typescript
+import { getTokenAddress, getTokenDecimals } from './tokens';
+
+// Get address by symbol
+const usdcAddress = getTokenAddress('USDC');
+
+// Get decimals (async)
+const decimals = await getTokenDecimals(provider, 'USDC');
+```
+
+### Hydration Guard
+
+The bot implements a **hydration guard** to prevent spurious state transitions for borrowers discovered during the seed scan:
+
+**Problem:** Borrowers seeded from historical events may have stale or incomplete balance data, leading to incorrect Health Factor calculations and false SAFE→LIQUIDATABLE transitions.
+
+**Solution:**
+1. **Seeded borrowers** are marked as `hydrated: false` when added during startup scan
+2. **HF recomputation is skipped** for non-hydrated borrowers in:
+   - Block loop (`processBlock`)
+   - Price update handlers (`handlePriceUpdate`)
+   - Event handlers (`handleBorrowerUpdate`)
+3. **Hydration occurs** when an Aave event (Borrow, Repay, Supply, Withdraw) updates the borrower's balances
+4. **Hydration log** is emitted: `"Borrower hydrated | address=0x... | firstHydratedAt=..."`
+5. **State transitions** are only allowed after hydration
+
+**Example Flow:**
+```
+Seed Scan → Add borrower (hydrated=false)
+  ↓
+Skip HF recomputation (borrower not hydrated)
+  ↓
+Aave event (e.g., Borrow) → Update balances → Set hydrated=true
+  ↓
+HF recomputation now allowed → State transitions enabled
+```
+
+This prevents the bot from attempting to liquidate borrowers with stale data before their balances are confirmed via on-chain events.
 
 ## 📦 Installation
 
@@ -199,6 +264,7 @@ The bot performs a one-time historical scan at startup to discover existing borr
 4. **Balance Fetching**: Queries on-chain collateral and debt balances for each borrower
 5. **MIN_DEBT_USD Filtering**: Computes total debt in USD using Aave Oracle prices
 6. **Registry Population**: Adds borrowers with debt ≥ MIN_DEBT_USD to the registry as SAFE
+7. **Hydration Status**: Seeded borrowers are marked as `hydrated=false` until their first Aave event updates balances
 
 ### Progress Reporting
 
@@ -210,13 +276,14 @@ The seed scan logs progress at 20%, 40%, 60%, 80%, and 100% completion:
 
 ### Candidate Cap & Early Stop
 
-To avoid memory exhaustion, the scan stops early if:
+To avoid memory exhaustion, the scan **stops immediately** when:
 - `borrowers_found >= MAX_CANDIDATES` (default: 50,000)
-- AND `progress >= 80%`
 
 ```
-[seed] stopped early at 80% — max candidates reached (50,000)
+[seed] stopped early — max candidates reached (50,000) | blocks_scanned=62,000/100,000
 ```
+
+**Note:** The previous ≥80% progress requirement has been removed for more aggressive memory protection.
 
 ### Configuration
 

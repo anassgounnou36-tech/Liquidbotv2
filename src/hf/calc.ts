@@ -1,4 +1,5 @@
 import { Borrower, BorrowerBalance } from '../state/borrower';
+import { getTokenDecimalsSync } from '../tokens';
 import logger from '../logging/logger';
 
 // Aave liquidation threshold (from protocol, typically stored per asset)
@@ -34,7 +35,8 @@ export function calculateHealthFactor(
       logger.warn('Price not found for debt asset', { asset: balance.asset });
       return sum;
     }
-    return sum + (Number(balance.amount) * price.priceUsd / 1e6); // Assuming 6 decimals for USDC
+    const decimals = getTokenDecimalsSync(balance.asset);
+    return sum + (Number(balance.amount) * price.priceUsd / Math.pow(10, decimals));
   }, 0);
   
   if (totalDebt === 0) {
@@ -54,7 +56,8 @@ export function calculateHealthFactor(
                      DEFAULT_LIQUIDATION_THRESHOLDS[balance.asset] || 
                      0.75; // Default fallback
     
-    const collateralValue = Number(balance.amount) * price.priceUsd / 1e18; // Assuming 18 decimals for ETH
+    const decimals = getTokenDecimalsSync(balance.asset);
+    const collateralValue = Number(balance.amount) * price.priceUsd / Math.pow(10, decimals);
     return sum + (collateralValue * threshold);
   }, 0);
   
@@ -118,11 +121,13 @@ export function estimateLiquidation(
   
   // Calculate max liquidatable debt (50% of total debt)
   const maxDebtAmount = debtBalance.amount / 2n;
-  const debtValueUsd = Number(maxDebtAmount) * debtPrice.priceUsd / 1e6; // Assuming 6 decimals
+  const debtDecimals = getTokenDecimalsSync(debtAsset);
+  const debtValueUsd = Number(maxDebtAmount) * debtPrice.priceUsd / Math.pow(10, debtDecimals);
   
   // Calculate required collateral (with bonus)
   const requiredCollateralValueUsd = debtValueUsd * (1 + liquidationBonus);
-  const requiredCollateralAmount = BigInt(Math.floor(requiredCollateralValueUsd / collateralPrice.priceUsd * 1e18)); // Assuming 18 decimals
+  const collateralDecimals = getTokenDecimalsSync(collateralAsset);
+  const requiredCollateralAmount = BigInt(Math.floor(requiredCollateralValueUsd / collateralPrice.priceUsd * Math.pow(10, collateralDecimals)));
   
   // Check if enough collateral available
   if (requiredCollateralAmount > collateralBalance.amount) {
@@ -131,7 +136,7 @@ export function estimateLiquidation(
   
   // Calculate profit (bonus amount in USD)
   const profitUsd = debtValueUsd * liquidationBonus;
-  const collateralValueUsd = Number(requiredCollateralAmount) * collateralPrice.priceUsd / 1e18;
+  const collateralValueUsd = Number(requiredCollateralAmount) * collateralPrice.priceUsd / Math.pow(10, collateralDecimals);
   
   return {
     debtAsset,

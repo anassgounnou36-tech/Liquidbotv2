@@ -40,6 +40,10 @@ export interface Borrower {
   oracleHF: number; // Using on-chain oracle prices
   lastHFUpdate: number;
   
+  // Hydration guard: do not compute HF until balances are hydrated
+  hydrated: boolean; // false for seeded borrowers until first event updates balances
+  firstHydratedAt?: number; // Timestamp when first hydrated
+  
   // State transition history
   stateHistory: Array<{
     state: BorrowerState;
@@ -77,7 +81,7 @@ export interface Borrower {
 }
 
 // Create a new borrower
-export function createBorrower(address: string, state: BorrowerState = BorrowerState.SAFE): Borrower {
+export function createBorrower(address: string, state: BorrowerState = BorrowerState.SAFE, hydrated: boolean = false): Borrower {
   const now = Date.now();
   return {
     address,
@@ -87,6 +91,7 @@ export function createBorrower(address: string, state: BorrowerState = BorrowerS
     predictedHF: Infinity,
     oracleHF: Infinity,
     lastHFUpdate: now,
+    hydrated, // Initialize hydration status
     stateHistory: [{
       state,
       timestamp: now,
