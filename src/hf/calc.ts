@@ -1,22 +1,6 @@
 import { Borrower, BorrowerBalance } from '../state/borrower';
+import { getTokenDecimalsSync } from '../tokens';
 import logger from '../logging/logger';
-
-// Standard token decimals for Base network
-const TOKEN_DECIMALS: Record<string, number> = {
-  'USDC': 6,
-  'EURC': 6,
-  'WETH': 18,
-  'cbETH': 18,
-  'weETH': 18,
-  'wstETH': 18,
-  'cbBTC': 8,
-  'GHO': 18
-};
-
-// Get token decimals (with fallback to standard values)
-function getTokenDecimals(asset: string): number {
-  return TOKEN_DECIMALS[asset] || 18; // Default to 18 decimals if unknown
-}
 
 // Aave liquidation threshold (from protocol, typically stored per asset)
 // This should be fetched from Aave protocol data, but we use reasonable defaults
@@ -51,7 +35,7 @@ export function calculateHealthFactor(
       logger.warn('Price not found for debt asset', { asset: balance.asset });
       return sum;
     }
-    const decimals = getTokenDecimals(balance.asset);
+    const decimals = getTokenDecimalsSync(balance.asset);
     return sum + (Number(balance.amount) * price.priceUsd / Math.pow(10, decimals));
   }, 0);
   
@@ -72,7 +56,7 @@ export function calculateHealthFactor(
                      DEFAULT_LIQUIDATION_THRESHOLDS[balance.asset] || 
                      0.75; // Default fallback
     
-    const decimals = getTokenDecimals(balance.asset);
+    const decimals = getTokenDecimalsSync(balance.asset);
     const collateralValue = Number(balance.amount) * price.priceUsd / Math.pow(10, decimals);
     return sum + (collateralValue * threshold);
   }, 0);
@@ -137,12 +121,12 @@ export function estimateLiquidation(
   
   // Calculate max liquidatable debt (50% of total debt)
   const maxDebtAmount = debtBalance.amount / 2n;
-  const debtDecimals = getTokenDecimals(debtAsset);
+  const debtDecimals = getTokenDecimalsSync(debtAsset);
   const debtValueUsd = Number(maxDebtAmount) * debtPrice.priceUsd / Math.pow(10, debtDecimals);
   
   // Calculate required collateral (with bonus)
   const requiredCollateralValueUsd = debtValueUsd * (1 + liquidationBonus);
-  const collateralDecimals = getTokenDecimals(collateralAsset);
+  const collateralDecimals = getTokenDecimalsSync(collateralAsset);
   const requiredCollateralAmount = BigInt(Math.floor(requiredCollateralValueUsd / collateralPrice.priceUsd * Math.pow(10, collateralDecimals)));
   
   // Check if enough collateral available

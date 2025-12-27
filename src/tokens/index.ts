@@ -8,6 +8,24 @@ export interface TokenCatalog {
   [symbol: string]: string;
 }
 
+// Standard token decimals for Base network
+// Used for HF calculations when async lookups are not possible
+export const TOKEN_DECIMALS: Record<string, number> = {
+  'USDC': 6,
+  'EURC': 6,
+  'WETH': 18,
+  'cbETH': 18,
+  'weETH': 18,
+  'wstETH': 18,
+  'cbBTC': 8,
+  'GHO': 18
+};
+
+// Get token decimals (synchronous, from catalog)
+export function getTokenDecimalsSync(symbol: string): number {
+  return TOKEN_DECIMALS[symbol] || 18; // Default to 18 decimals if unknown
+}
+
 // Get token address from catalog by symbol
 export function getTokenAddress(symbol: string): string {
   // First check the token catalog
@@ -24,7 +42,7 @@ export function getTokenAddress(symbol: string): string {
   }
 }
 
-// Get token decimals by symbol
+// Get token decimals by symbol (async)
 export async function getTokenDecimals(
   provider: ethers.JsonRpcProvider,
   symbol: string
@@ -38,7 +56,7 @@ export async function getTokenDecimals(
   }
 }
 
-// Get token decimals by address
+// Get token decimals by address (async)
 export async function getTokenDecimalsByAddress(
   provider: ethers.JsonRpcProvider,
   address: string
