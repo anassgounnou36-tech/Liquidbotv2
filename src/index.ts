@@ -11,7 +11,8 @@ import { buildLiquidationTx, signTransaction } from './execution/tx';
 import { broadcastTransaction, waitForTransaction } from './execution/broadcast';
 import { simulateFlashLiquidation, executeFlashLiquidation } from './execution/flash';
 import { sendTelegram } from './notify/telegram';
-import { getAaveAddresses, AAVE_POOL_ABI, ERC20_ABI, getAssetAddress } from './aave/addresses';
+import { getAaveAddresses, AAVE_POOL_ABI, ERC20_ABI } from './aave/addresses';
+import { getTokenAddress } from './tokens';
 
 // Global state
 let provider: ethers.JsonRpcProvider;
@@ -82,9 +83,9 @@ async function seedBorrowersOnce(): Promise<void> {
           lastProgressPct = progressPct;
         }
         
-        // Early stop: if we've found MAX_CANDIDATES and scanned >= 80%
-        if (uniqueBorrowers.size >= config.maxCandidates && progressPct >= 80) {
-          logger.info(`[seed] stopped early at ${progressPct}% — max candidates reached (${config.maxCandidates})`);
+        // Early stop: if we've found MAX_CANDIDATES, stop immediately
+        if (uniqueBorrowers.size >= config.maxCandidates) {
+          logger.info(`[seed] stopped early — max candidates reached (${config.maxCandidates}) | blocks_scanned=${blocksScanned}/${totalBlocks}`);
           break;
         }
       } catch (error) {
@@ -105,8 +106,8 @@ async function seedBorrowersOnce(): Promise<void> {
     
     for (const borrowerAddress of uniqueBorrowers) {
       try {
-        // Add borrower temporarily to registry
-        const borrower = borrowerRegistry.addBorrower(borrowerAddress, BorrowerState.SAFE);
+        // Add borrower temporarily to registry (not hydrated, from seed scan)
+        const borrower = borrowerRegistry.addBorrower(borrowerAddress, BorrowerState.SAFE, false);
         
         // Fetch on-chain balances
         await updateBorrowerBalancesForSeed(borrowerAddress);
@@ -126,7 +127,7 @@ async function seedBorrowersOnce(): Promise<void> {
           borrower: borrowerAddress,
           error
         });
-        // Remove on error
+        // Remove on error - but log as warning, don't throw
         borrowerRegistry.removeBorrower(borrowerAddress);
       }
     }
@@ -176,7 +177,7 @@ async function updateBorrowerBalancesForSeed(userAddress: string): Promise<void>
   const collateralBalances = [];
   for (const asset of config.targetCollateralAssets) {
     try {
-      const assetAddress = getAssetAddress(asset);
+      const assetAddress = getTokenAddress(asset);
       const reserveData = await poolContract.getReserveData(assetAddress);
       const aTokenAddress = reserveData.aTokenAddress;
       
@@ -199,7 +200,7 @@ async function updateBorrowerBalancesForSeed(userAddress: string): Promise<void>
   const debtBalances = [];
   for (const asset of config.targetDebtAssets) {
     try {
-      const assetAddress = getAssetAddress(asset);
+      const assetAddress = getTokenAddress(asset);
       const reserveData = await poolContract.getReserveData(assetAddress);
       const debtTokenAddress = reserveData.variableDebtTokenAddress;
       
@@ -346,6 +347,14 @@ async function processBlock(): Promise<void> {
     for (const borrower of watchBorrowers) {
       if (prices.size === 0) continue;
       
+      // Skip HF recomputation if borrower is not hydrated yet
+      if (!borrower.hydrated) {
+        logger.debug('Skipping HF recomputation for non-hydrated borrower', {
+          borrower: borrower.address
+        });
+        continue;
+      }
+      
       const newHF = calculateBorrowerHF(borrower, prices);
       
       // Update HF and potentially transition state
@@ -392,6 +401,15 @@ function handlePriceUpdate(asset: string): void {
     
     if (!hasAsset) continue;
     
+    // Skip HF recomputation if borrower is not hydrated yet
+    if (!borrower.hydrated) {
+      logger.debug('Skipping HF recomputation for non-hydrated borrower on price update', {
+        borrower: borrower.address,
+        asset
+      });
+      continue;
+    }
+    
     // Recompute HF
     const newHF = calculateBorrowerHF(borrower, prices);
     
@@ -420,6 +438,14 @@ function handleBorrowerUpdate(address: string): void {
   
   const prices = priceAggregator.getAllPrices();
   if (prices.size === 0) return;
+  
+  // Skip HF recomputation if borrower is not hydrated yet
+  if (!borrower.hydrated) {
+    logger.debug('Skipping HF recomputation for non-hydrated borrower on event', {
+      borrower: borrower.address
+    });
+    return;
+  }
   
   // Recompute HF
   const newHF = calculateBorrowerHF(borrower, prices);
