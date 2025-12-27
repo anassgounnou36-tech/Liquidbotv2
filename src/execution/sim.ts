@@ -224,3 +224,45 @@ export async function getOraclePrices(
   
   return prices;
 }
+
+// Get total debt in USD for a borrower using oracle prices
+export async function getTotalDebtUSD(
+  provider: ethers.JsonRpcProvider,
+  borrower: Borrower
+): Promise<number> {
+  if (borrower.debtBalances.length === 0) {
+    return 0;
+  }
+  
+  // Get unique debt assets
+  const debtAssets = [...new Set(borrower.debtBalances.map(b => b.asset))];
+  
+  // Get oracle prices
+  const oraclePrices = await getOraclePrices(provider, debtAssets);
+  
+  // Compute total debt USD
+  let totalDebtUSD = 0;
+  
+  for (const debtBalance of borrower.debtBalances) {
+    const price = oraclePrices.get(debtBalance.asset);
+    if (!price) {
+      logger.warn('Oracle price not found for debt asset', { asset: debtBalance.asset });
+      continue;
+    }
+    
+    // Get decimals for the asset
+    const assetAddress = getAssetAddress(debtBalance.asset);
+    const ERC20_ABI = ['function decimals() external view returns (uint8)'];
+    const tokenContract = new ethers.Contract(assetAddress, ERC20_ABI, provider);
+    
+    try {
+      const decimals = await tokenContract.decimals();
+      const amount = Number(debtBalance.amount) / Math.pow(10, decimals);
+      totalDebtUSD += amount * price;
+    } catch (error) {
+      logger.error('Failed to get decimals for asset', { asset: debtBalance.asset, error });
+    }
+  }
+  
+  return totalDebtUSD;
+}

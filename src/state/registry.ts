@@ -210,6 +210,14 @@ class BorrowerRegistry {
     const key = address.toLowerCase();
     return this.borrowerMutex.get(key) || false;
   }
+  
+  // Update skip reason for borrower (for audit classification)
+  updateSkipReason(address: string, reason: string): void {
+    const borrower = this.getBorrower(address);
+    if (borrower) {
+      borrower.lastSkipReason = reason;
+    }
+  }
 }
 
 // Export singleton instance

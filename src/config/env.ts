@@ -60,6 +60,15 @@ export interface BotConfig {
   logLevel: string;
   logFile: string;
   
+  // Startup seed scan
+  seedLookbackBlocks: number;
+  maxCandidates: number;
+  minDebtUsd: number;
+  
+  // Telegram notifications
+  telegramBotToken: string;
+  telegramChatId: string;
+  
   // Advanced
   blockPollInterval: number;
   priceUpdateDebounce: number;
@@ -130,6 +139,15 @@ function parseConfig(): BotConfig {
     // Logging
     logLevel: process.env.LOG_LEVEL || 'info',
     logFile: process.env.LOG_FILE || '',
+    
+    // Startup seed scan
+    seedLookbackBlocks: parseInt(process.env.SEED_LOOKBACK_BLOCKS || '100000', 10),
+    maxCandidates: parseInt(process.env.MAX_CANDIDATES || '50000', 10),
+    minDebtUsd: parseFloat(process.env.MIN_DEBT_USD || '50'),
+    
+    // Telegram notifications
+    telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || '',
+    telegramChatId: process.env.TELEGRAM_CHAT_ID || '',
     
     // Advanced
     blockPollInterval: parseInt(process.env.BLOCK_POLL_INTERVAL || '1000', 10),

@@ -4,6 +4,8 @@ import { getConfig } from '../config/env';
 import { getAaveAddresses, AAVE_POOL_ABI, ERC20_ABI, getAssetAddress } from './addresses';
 import { borrowerRegistry } from '../state/registry';
 import { BorrowerState, BorrowerBalance } from '../state/borrower';
+import { getTotalDebtUSD, getOracleHealthFactor } from '../execution/sim';
+import { sendTelegram } from '../notify/telegram';
 import logger from '../logging/logger';
 
 // Aave event listener
@@ -101,11 +103,41 @@ export class AaveEventListener extends EventEmitter {
       blockNumber: event.blockNumber
     });
     
-    // Add borrower to registry if not exists
-    borrowerRegistry.addBorrower(onBehalfOf, BorrowerState.SAFE);
+    const config = getConfig();
+    
+    // Check if borrower exists
+    let borrower = borrowerRegistry.getBorrower(onBehalfOf);
+    const isNew = !borrower;
+    
+    // Add borrower to registry if not exists (temporarily)
+    if (!borrower) {
+      borrower = borrowerRegistry.addBorrower(onBehalfOf, BorrowerState.SAFE);
+    }
     
     // Update cached balances
     await this.updateBorrowerBalances(onBehalfOf);
+    
+    // For new borrowers, check MIN_DEBT_USD threshold
+    if (isNew) {
+      const totalDebtUSD = await getTotalDebtUSD(this.provider, borrower);
+      
+      if (totalDebtUSD < config.minDebtUsd) {
+        logger.info('Skipping new borrower: debt below MIN_DEBT_USD', {
+          user: onBehalfOf,
+          totalDebtUSD: totalDebtUSD.toFixed(2),
+          minDebtUsd: config.minDebtUsd
+        });
+        // Remove from registry
+        borrowerRegistry.removeBorrower(onBehalfOf);
+        return;
+      }
+      
+      logger.info('New borrower added: meets MIN_DEBT_USD threshold', {
+        user: onBehalfOf,
+        totalDebtUSD: totalDebtUSD.toFixed(2),
+        minDebtUsd: config.minDebtUsd
+      });
+    }
     
     // Mark as updated
     borrowerRegistry.markBorrowerUpdated(onBehalfOf);
@@ -148,6 +180,9 @@ export class AaveEventListener extends EventEmitter {
     liquidatedCollateralAmount: bigint,
     event: ethers.Log
   ): Promise<void> {
+    const config = getConfig();
+    const stats = borrowerRegistry.getStats();
+    
     logger.info('Liquidation event detected', {
       user,
       collateralAsset,
@@ -156,6 +191,104 @@ export class AaveEventListener extends EventEmitter {
       liquidatedCollateralAmount: liquidatedCollateralAmount.toString(),
       blockNumber: event.blockNumber
     });
+    
+    // Get transaction details
+    const txHash = event.transactionHash;
+    const blockNumber = event.blockNumber;
+    
+    // Compute USD values for the liquidation
+    let debtUSD = 0;
+    let collateralUSD = 0;
+    
+    try {
+      // Get asset symbols from addresses
+      const debtSymbol = this.getAssetSymbol(debtAsset);
+      const collateralSymbol = this.getAssetSymbol(collateralAsset);
+      
+      // Get decimals
+      const debtTokenContract = new ethers.Contract(debtAsset, ERC20_ABI, this.provider);
+      const collateralTokenContract = new ethers.Contract(collateralAsset, ERC20_ABI, this.provider);
+      
+      const debtDecimals = await debtTokenContract.decimals();
+      const collateralDecimals = await collateralTokenContract.decimals();
+      
+      // Get oracle prices
+      const oracleContract = new ethers.Contract(
+        getAaveAddresses().oracle,
+        ['function getAssetPrice(address asset) external view returns (uint256)'],
+        this.provider
+      );
+      
+      const debtPrice = await oracleContract.getAssetPrice(debtAsset);
+      const collateralPrice = await oracleContract.getAssetPrice(collateralAsset);
+      
+      // Aave oracle returns prices in 8 decimals USD
+      const debtPriceUSD = Number(debtPrice) / 1e8;
+      const collateralPriceUSD = Number(collateralPrice) / 1e8;
+      
+      // Compute USD values
+      const debtAmount = Number(debtToCover) / Math.pow(10, debtDecimals);
+      const collateralAmount = Number(liquidatedCollateralAmount) / Math.pow(10, collateralDecimals);
+      
+      debtUSD = debtAmount * debtPriceUSD;
+      collateralUSD = collateralAmount * collateralPriceUSD;
+      
+      // Classify reason for missed liquidation
+      const borrower = borrowerRegistry.getBorrower(user);
+      let reason = 'unknown';
+      
+      if (!borrower || borrower.state === BorrowerState.SAFE) {
+        reason = 'not_in_watch_set';
+      } else if (debtUSD < config.minDebtUsd) {
+        reason = 'below_min_debt';
+      } else if (borrower.state === BorrowerState.WATCH || borrower.state === BorrowerState.CRITICAL) {
+        // Check if we had prepared this liquidation
+        if (borrower.lastPreparedBlock && borrower.lastPreparedBlock < blockNumber) {
+          reason = 'raced';
+        } else {
+          // Check oracle HF at audit time
+          const oracleHF = await getOracleHealthFactor(this.provider, user);
+          if (oracleHF >= 1.0) {
+            reason = 'oracle_not_liquidatable';
+          } else if (borrower.lastSkipReason === 'profit_floor') {
+            reason = 'filtered_by_profit';
+          } else if (borrower.lastSkipReason === 'gas_guard') {
+            reason = 'filtered_by_gas';
+          }
+        }
+      }
+      
+      // Build audit message
+      const auditMessage = `🔍 LIQUIDATION AUDIT
+Borrower: ${user}
+Debt Asset: ${debtSymbol} (${debtAsset})
+Collateral Asset: ${collateralSymbol} (${collateralAsset})
+Debt Covered: ${debtAmount.toFixed(6)} ${debtSymbol} ($${debtUSD.toFixed(2)})
+Collateral Seized: ${collateralAmount.toFixed(6)} ${collateralSymbol} ($${collateralUSD.toFixed(2)})
+Block: ${blockNumber}
+Tx: ${txHash}
+Reason: ${reason}
+Candidates Total: ${stats.total}`;
+      
+      logger.info('Liquidation audit', {
+        borrower: user,
+        debtAsset: debtSymbol,
+        collateralAsset: collateralSymbol,
+        debtUSD: debtUSD.toFixed(2),
+        collateralUSD: collateralUSD.toFixed(2),
+        blockNumber,
+        txHash,
+        reason,
+        candidatesTotal: stats.total
+      });
+      
+      // Send to Telegram (best-effort, optional)
+      sendTelegram(auditMessage).catch(error => {
+        logger.debug('Failed to send Telegram audit', { error });
+      });
+    } catch (error) {
+      logger.error('Error computing liquidation audit details', { error });
+    }
     
     // Update cached balances
     await this.updateBorrowerBalances(user);
@@ -173,6 +306,17 @@ export class AaveEventListener extends EventEmitter {
     }
   }
   
+  // Helper to get asset symbol from address
+  private getAssetSymbol(address: string): string {
+    const ASSET_ADDRESSES: Record<string, string> = {
+      '0x4200000000000000000000000000000000000006': 'WETH',
+      '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913': 'USDC',
+      '0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22': 'cbETH'
+    };
+    
+    return ASSET_ADDRESSES[address] || address;
+  }
+  
   // Handle Supply event
   private async handleSupplyEvent(
     reserve: string,
@@ -188,8 +332,36 @@ export class AaveEventListener extends EventEmitter {
       blockNumber: event.blockNumber
     });
     
-    // Update cached balances
-    await this.updateBorrowerBalances(onBehalfOf);
+    const config = getConfig();
+    
+    // Check if borrower exists
+    let borrower = borrowerRegistry.getBorrower(onBehalfOf);
+    const isNew = !borrower;
+    
+    // For new borrowers, check if they have debt first
+    if (isNew) {
+      borrower = borrowerRegistry.addBorrower(onBehalfOf, BorrowerState.SAFE);
+      
+      // Update cached balances
+      await this.updateBorrowerBalances(onBehalfOf);
+      
+      // Check MIN_DEBT_USD threshold
+      const totalDebtUSD = await getTotalDebtUSD(this.provider, borrower);
+      
+      if (totalDebtUSD < config.minDebtUsd) {
+        logger.debug('Skipping new borrower on Supply: debt below MIN_DEBT_USD', {
+          user: onBehalfOf,
+          totalDebtUSD: totalDebtUSD.toFixed(2),
+          minDebtUsd: config.minDebtUsd
+        });
+        // Remove from registry
+        borrowerRegistry.removeBorrower(onBehalfOf);
+        return;
+      }
+    } else {
+      // Update cached balances
+      await this.updateBorrowerBalances(onBehalfOf);
+    }
     
     // Mark as updated
     borrowerRegistry.markBorrowerUpdated(onBehalfOf);
@@ -213,8 +385,36 @@ export class AaveEventListener extends EventEmitter {
       blockNumber: event.blockNumber
     });
     
-    // Update cached balances
-    await this.updateBorrowerBalances(user);
+    const config = getConfig();
+    
+    // Check if borrower exists
+    let borrower = borrowerRegistry.getBorrower(user);
+    const isNew = !borrower;
+    
+    // For new borrowers, check if they have debt first
+    if (isNew) {
+      borrower = borrowerRegistry.addBorrower(user, BorrowerState.SAFE);
+      
+      // Update cached balances
+      await this.updateBorrowerBalances(user);
+      
+      // Check MIN_DEBT_USD threshold
+      const totalDebtUSD = await getTotalDebtUSD(this.provider, borrower);
+      
+      if (totalDebtUSD < config.minDebtUsd) {
+        logger.debug('Skipping new borrower on Withdraw: debt below MIN_DEBT_USD', {
+          user,
+          totalDebtUSD: totalDebtUSD.toFixed(2),
+          minDebtUsd: config.minDebtUsd
+        });
+        // Remove from registry
+        borrowerRegistry.removeBorrower(user);
+        return;
+      }
+    } else {
+      // Update cached balances
+      await this.updateBorrowerBalances(user);
+    }
     
     // Mark as updated
     borrowerRegistry.markBorrowerUpdated(user);

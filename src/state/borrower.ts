@@ -65,6 +65,11 @@ export interface Borrower {
     error?: string;
   };
   
+  // Audit tracking fields
+  lastSkipReason?: string; // Reason for last skip (e.g., "profit_floor", "gas_guard")
+  lastPreparedBlock?: number; // Block number when last prepared
+  lastExecutionAttemptAt?: number; // Timestamp of last execution attempt
+  
   // Timestamps
   firstSeenAt: number;
   lastUpdatedAt: number;
