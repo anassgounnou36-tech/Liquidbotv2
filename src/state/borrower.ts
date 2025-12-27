@@ -50,6 +50,18 @@ export interface Borrower {
   // Cached transaction (for CRITICAL state)
   cachedTx?: CachedTransaction;
   
+  // Flash liquidation result (for flash loan mode)
+  flashResult?: {
+    success: boolean;
+    debtAsset: string;
+    collateralAsset: string;
+    debtAmount: bigint;
+    expectedProfit: number;
+    gasEstimate: bigint;
+    gasUsd: number;
+    error?: string;
+  };
+  
   // Timestamps
   firstSeenAt: number;
   lastUpdatedAt: number;
