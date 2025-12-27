@@ -123,11 +123,11 @@ async function seedBorrowersOnce(): Promise<void> {
           addedCount++;
         }
       } catch (error) {
-        logger.warn('Error processing borrower in seed scan, skipping', {
+        logger.warn('Error processing borrower in seed scan, removing and continuing', {
           borrower: borrowerAddress,
           error
         });
-        // Remove on error but don't throw - skip and continue
+        // Remove borrower on processing error, but continue with next borrower (don't throw)
         borrowerRegistry.removeBorrower(borrowerAddress);
       }
     }

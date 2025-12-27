@@ -56,14 +56,19 @@ class DecimalsCache {
       }
       
       // Fallback to known-safe defaults based on token symbol lookup
-      const symbol = getTokenSymbol(address);
       let fallbackDecimals = 18; // Default fallback
       
-      if (symbol && TOKEN_DECIMALS[symbol]) {
-        fallbackDecimals = TOKEN_DECIMALS[symbol];
-        logger.debug('Using known decimals for symbol', { address, symbol, decimals: fallbackDecimals });
-      } else {
-        logger.debug('Using default 18 decimals', { address });
+      try {
+        const symbol = getTokenSymbol(address);
+        if (symbol && TOKEN_DECIMALS[symbol]) {
+          fallbackDecimals = TOKEN_DECIMALS[symbol];
+          logger.debug('Using known decimals for symbol', { address, symbol, decimals: fallbackDecimals });
+        } else {
+          logger.debug('Using default 18 decimals', { address });
+        }
+      } catch (symbolError) {
+        // If symbol lookup fails, use default
+        logger.debug('Symbol lookup failed, using default 18 decimals', { address });
       }
       
       // Cache the fallback value
@@ -88,7 +93,8 @@ export function getTokenDecimalsSync(symbol: string): number {
 }
 
 // Get token decimals by address using cache with robust fallback
-// This function NEVER throws and NEVER causes borrower removal
+// This function has comprehensive error handling and will always return a valid decimal value
+// Falls back to 18 decimals in worst case. Suitable for use in critical paths.
 export async function getTokenDecimalsByAddressCached(
   provider: ethers.JsonRpcProvider,
   address: string
