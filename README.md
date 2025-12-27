@@ -5,6 +5,9 @@ A production-grade, event-driven liquidation bot for Aave v3 on Base network, bu
 ## 🎯 Features
 
 - **Event-Driven Architecture**: Reacts to price changes and Aave events instead of polling
+- **Startup Seed Scan**: One-time historical scan of Borrow events to discover existing borrowers
+- **MIN_DEBT_USD Filtering**: Only tracks borrowers with debt above configurable threshold
+- **Candidate Cap**: Limits maximum borrowers tracked with early-stop optimization
 - **Balancer Flash Loans**: Zero-capital liquidations using Balancer V2 flash loans
 - **1inch Integration**: Real collateral-to-debt swaps using 1inch aggregation router
 - **State Machine**: Borrowers transition through SAFE → WATCH → CRITICAL → LIQUIDATABLE states
@@ -12,6 +15,8 @@ A production-grade, event-driven liquidation bot for Aave v3 on Base network, bu
 - **Price Staleness Guards**: Aborts execution if price feeds are stale or disconnected
 - **Fail-Closed Policy**: Requires at least one price feed (Binance OR Pyth) to be live
 - **Oracle Confirmation**: Verifies liquidation legality with on-chain oracle before execution
+- **Liquidation Audit System**: Diagnostics for missed liquidations with reason classification
+- **Telegram Notifications**: Optional notifications for seed completion and liquidation audits
 - **Strict Safety Controls**: Cache invalidation, block TTL, profit floor enforcement
 - **Borrower-Level Mutex**: Prevents concurrent operations on the same borrower
 - **Strict Block Loop**: Only recomputes HF for WATCH/CRITICAL borrowers using cached prices
@@ -38,12 +43,19 @@ SAFE → WATCH → CRITICAL → LIQUIDATABLE
 
 ### Components
 
-1. **Flash Liquidator Contract**: Solidity contract using Balancer V2 flash loans for zero-capital liquidations
-2. **Price Feeds**: Binance WebSocket + Pyth WebSocket for real-time prices with staleness detection
-3. **Event Listeners**: Monitor Borrow, Repay, Liquidation events from Aave
-4. **Block Loop**: Light operations only on WATCH/CRITICAL borrowers (no preparation in block loop)
-5. **Execution Engine**: Simulate (with callStatic), verify, and execute liquidations
-6. **Borrower Mutex**: Prevents concurrent preparation/execution for the same borrower
+1. **Startup Seed Scan**: One-time historical scan at startup to discover existing borrowers
+   - Scans Borrow events over configurable lookback period (default: 100,000 blocks)
+   - Filters borrowers by MIN_DEBT_USD threshold using oracle prices
+   - Implements candidate cap with early stop at ≥80% progress
+   - Progress reporting at 20%, 40%, 60%, 80%, 100%
+   - Runs once before block loop starts
+2. **Flash Liquidator Contract**: Solidity contract using Balancer V2 flash loans for zero-capital liquidations
+3. **Price Feeds**: Binance WebSocket + Pyth WebSocket for real-time prices with staleness detection
+4. **Event Listeners**: Monitor Borrow, Repay, Liquidation events from Aave with MIN_DEBT_USD filtering
+5. **Block Loop**: Light operations only on WATCH/CRITICAL borrowers (no preparation in block loop)
+6. **Execution Engine**: Simulate (with callStatic), verify, and execute liquidations
+7. **Borrower Mutex**: Prevents concurrent preparation/execution for the same borrower
+8. **Liquidation Audit**: Diagnostics for missed liquidations with reason classification and Telegram alerts
 
 ## 📦 Installation
 
@@ -167,10 +179,206 @@ SIGNER_PK=your_private_key_here
 ### Optional Configuration
 
 See `.env.example` for all available configuration options including:
+- Startup seed scan parameters
+- MIN_DEBT_USD filtering
+- Telegram notifications
 - Price feed mappings (Binance, Pyth)
 - Private relay settings
 - Logging configuration
 - Advanced parameters
+
+## 🌱 Startup Seed Scan
+
+The bot performs a one-time historical scan at startup to discover existing borrowers before entering the runtime event loop.
+
+### How It Works
+
+1. **Historical Event Query**: Scans Borrow events over the last `SEED_LOOKBACK_BLOCKS` blocks (default: 100,000)
+2. **Batched Queries**: Uses 2,000-block batches to avoid RPC provider limits
+3. **Unique Borrower Extraction**: Deduplicates borrower addresses from events
+4. **Balance Fetching**: Queries on-chain collateral and debt balances for each borrower
+5. **MIN_DEBT_USD Filtering**: Computes total debt in USD using Aave Oracle prices
+6. **Registry Population**: Adds borrowers with debt ≥ MIN_DEBT_USD to the registry as SAFE
+
+### Progress Reporting
+
+The seed scan logs progress at 20%, 40%, 60%, 80%, and 100% completion:
+
+```
+[seed] 40% complete | borrowers_found=18,420 | blocks_scanned=40,000/100,000
+```
+
+### Candidate Cap & Early Stop
+
+To avoid memory exhaustion, the scan stops early if:
+- `borrowers_found >= MAX_CANDIDATES` (default: 50,000)
+- AND `progress >= 80%`
+
+```
+[seed] stopped early at 80% — max candidates reached (50,000)
+```
+
+### Configuration
+
+```env
+# Startup Seed Scan Configuration
+SEED_LOOKBACK_BLOCKS=100000  # Number of blocks to scan backward
+MAX_CANDIDATES=50000         # Maximum borrowers to track (early stop)
+MIN_DEBT_USD=50             # Minimum debt threshold in USD
+```
+
+### Completion Summary
+
+```
+=== Seed Scan Complete ===
+Total Borrowers Found: 25,842
+Added to Registry: 1,234
+Filtered (below MIN_DEBT_USD): 24,608
+MIN_DEBT_USD: $50
+```
+
+## 📊 MIN_DEBT_USD Filtering
+
+The bot enforces a global `MIN_DEBT_USD` threshold to filter out low-value borrowers and reduce noise.
+
+### Where It's Applied
+
+1. **Startup Seed Scan**: Never adds borrowers with debt < MIN_DEBT_USD
+2. **Borrow Events**: Computes totalDebtUSD; skips adding if below threshold
+3. **Supply/Withdraw Events**: For new borrowers, checks debt before adding
+4. **Repay Events**: Re-validates debt after repayment
+5. **Liquidation Events**: Audits liquidations below threshold (diagnostics only)
+6. **Preparation**: Aborts preparation if debt drops below threshold
+7. **Execution**: Final check before executing liquidation
+
+### How It Works
+
+- Uses **Aave Oracle prices** (on-chain) for consistency
+- Queries ERC20 decimals for accurate USD conversion
+- Computed as: `Σ(debt_amount / 10^decimals × oracle_price_usd)`
+- Applied uniformly across all code paths
+
+### Configuration
+
+```env
+MIN_DEBT_USD=50  # Only track borrowers with debt >= $50
+```
+
+### Logging Example
+
+```
+Skipping new borrower: debt below MIN_DEBT_USD
+  user: 0x1234...
+  totalDebtUSD: 23.45
+  minDebtUsd: 50
+```
+
+## 🔍 Liquidation Audit System
+
+The bot includes a diagnostics-only audit system that logs missed liquidations with reason classification.
+
+### When It Triggers
+
+- **LiquidationCall events** detected on-chain (by any liquidator)
+- Bot emits a structured audit log with classification
+
+### Audit Information
+
+- Borrower address
+- Debt asset, collateral asset
+- Debt covered (amount + USD value)
+- Collateral seized (amount + USD value)
+- Block number, transaction hash
+- Current registry size (`candidates_total`)
+- **Reason classification**
+
+### Reason Classification
+
+| Reason | Description |
+|--------|-------------|
+| `not_in_watch_set` | Borrower not in registry OR state was SAFE |
+| `below_min_debt` | Liquidation debt < MIN_DEBT_USD |
+| `raced` | Borrower was WATCH/CRITICAL but liquidated before our execution |
+| `oracle_not_liquidatable` | On-chain HF ≥ 1.0 at audit time |
+| `filtered_by_profit` | Last skip reason was profit floor |
+| `filtered_by_gas` | Last skip reason was gas guard |
+| `unknown` | Default fallback |
+
+### Audit Log Example
+
+```
+Liquidation audit
+  borrower: 0xabcd...
+  debtAsset: USDC
+  collateralAsset: WETH
+  debtUSD: 1523.45
+  collateralUSD: 1685.23
+  blockNumber: 12345678
+  txHash: 0x9876...
+  reason: raced
+  candidatesTotal: 1234
+```
+
+### Telegram Integration
+
+If configured, the audit message is also sent to Telegram:
+
+```
+🔍 LIQUIDATION AUDIT
+Borrower: 0xabcd...
+Debt Asset: USDC (0x833...)
+Collateral Asset: WETH (0x4200...)
+Debt Covered: 1523.450000 USDC ($1523.45)
+Collateral Seized: 0.850000 WETH ($1685.23)
+Block: 12345678
+Tx: 0x9876...
+Reason: raced
+Candidates Total: 1234
+```
+
+## 📱 Telegram Notifications
+
+Optional Telegram integration for seed completion and liquidation audit alerts.
+
+### Setup
+
+1. **Create a Telegram Bot**
+   - Message [@BotFather](https://t.me/BotFather) on Telegram
+   - Send `/newbot` and follow instructions
+   - Save the bot token (format: `123456789:ABCdefGHIjklMNOpqrsTUVwxyz`)
+
+2. **Get Your Chat ID**
+   - Message your bot
+   - Visit `https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates`
+   - Find your chat ID in the JSON response
+
+3. **Configure Environment**
+   ```env
+   TELEGRAM_BOT_TOKEN=123456789:ABCdefGHIjklMNOpqrsTUVwxyz
+   TELEGRAM_CHAT_ID=987654321
+   ```
+
+### What Gets Notified
+
+- **Seed Scan Completion**: Summary with total found, added, filtered
+- **Liquidation Audits**: Detailed audit message with reason classification
+
+### Error Handling
+
+- **Graceful Failures**: Errors are logged but never crash the bot
+- **No-Op Mode**: If `TELEGRAM_BOT_TOKEN` or `TELEGRAM_CHAT_ID` is empty, notifications are skipped
+- **Best-Effort**: Uses simple HTTPS POST; retries not implemented
+
+### Logging
+
+```
+Telegram notification sent successfully
+```
+
+```
+Failed to send Telegram notification
+  error: Network timeout
+```
 
 ## 🚀 Usage
 
@@ -213,6 +421,7 @@ npm test
 - ❌ Do NOT execute if net profit (after gas) < MIN_PROFIT_USD
 - ❌ Do NOT execute without 1inch swap calldata
 - ❌ Do NOT prepare liquidations in the block loop (event-driven only)
+- ❌ Do NOT track borrowers with debt < MIN_DEBT_USD
 
 ### Safety Controls
 

@@ -6,10 +6,12 @@ import { BorrowerState } from './state/borrower';
 import { priceAggregator } from './prices';
 import { AaveEventListener } from './aave/events';
 import { calculateBorrowerHF } from './hf/calc';
-import { simulateLiquidation, getOracleHealthFactor } from './execution/sim';
+import { simulateLiquidation, getOracleHealthFactor, getTotalDebtUSD } from './execution/sim';
 import { buildLiquidationTx, signTransaction } from './execution/tx';
 import { broadcastTransaction, waitForTransaction } from './execution/broadcast';
 import { simulateFlashLiquidation, executeFlashLiquidation } from './execution/flash';
+import { sendTelegram } from './notify/telegram';
+import { getAaveAddresses, AAVE_POOL_ABI, ERC20_ABI, getAssetAddress } from './aave/addresses';
 
 // Global state
 let provider: ethers.JsonRpcProvider;
@@ -17,6 +19,209 @@ let signer: ethers.Wallet | null = null;
 let aaveEventListener: AaveEventListener;
 let blockLoopInterval: NodeJS.Timeout | null = null;
 let activeLiquidations = 0;
+let seedScanCompleted = false; // Track if seed scan has run
+
+// Startup seed scan: scan historical Borrow events once
+async function seedBorrowersOnce(): Promise<void> {
+  if (seedScanCompleted) {
+    logger.warn('Seed scan already completed, skipping');
+    return;
+  }
+  
+  const config = getConfig();
+  const addresses = getAaveAddresses();
+  
+  logger.info('=== Starting Seed Scan ===', {
+    lookbackBlocks: config.seedLookbackBlocks,
+    maxCandidates: config.maxCandidates,
+    minDebtUsd: config.minDebtUsd
+  });
+  
+  try {
+    const currentBlock = await provider.getBlockNumber();
+    const startBlock = Math.max(0, currentBlock - config.seedLookbackBlocks);
+    const totalBlocks = currentBlock - startBlock;
+    
+    // Batch size for queryFilter (to avoid provider limits)
+    const BATCH_SIZE = 2000;
+    
+    const poolContract = new ethers.Contract(
+      addresses.pool,
+      AAVE_POOL_ABI,
+      provider
+    );
+    
+    // Track unique borrowers
+    const uniqueBorrowers = new Set<string>();
+    let blocksScanned = 0;
+    let lastProgressPct = 0;
+    
+    // Query in batches
+    for (let fromBlock = startBlock; fromBlock <= currentBlock; fromBlock += BATCH_SIZE) {
+      const toBlock = Math.min(fromBlock + BATCH_SIZE - 1, currentBlock);
+      
+      try {
+        // Query Borrow events
+        const filter = poolContract.filters.Borrow();
+        const events = await poolContract.queryFilter(filter, fromBlock, toBlock);
+        
+        // Extract borrower addresses
+        for (const event of events) {
+          // TypeScript check for EventLog
+          if ('args' in event && event.args && event.args.onBehalfOf) {
+            uniqueBorrowers.add(event.args.onBehalfOf.toLowerCase());
+          }
+        }
+        
+        blocksScanned += (toBlock - fromBlock + 1);
+        
+        // Progress reporting at 20%, 40%, 60%, 80%, 100%
+        const progressPct = Math.floor((blocksScanned / totalBlocks) * 100);
+        if (progressPct >= lastProgressPct + 20 || blocksScanned === totalBlocks) {
+          logger.info(`[seed] ${progressPct}% complete | borrowers_found=${uniqueBorrowers.size} | blocks_scanned=${blocksScanned}/${totalBlocks}`);
+          lastProgressPct = progressPct;
+        }
+        
+        // Early stop: if we've found MAX_CANDIDATES and scanned >= 80%
+        if (uniqueBorrowers.size >= config.maxCandidates && progressPct >= 80) {
+          logger.info(`[seed] stopped early at ${progressPct}% — max candidates reached (${config.maxCandidates})`);
+          break;
+        }
+      } catch (error) {
+        logger.error('Error querying Borrow events in batch', {
+          fromBlock,
+          toBlock,
+          error
+        });
+        // Continue to next batch on error
+      }
+    }
+    
+    logger.info(`[seed] Scan complete. Found ${uniqueBorrowers.size} unique borrowers`);
+    
+    // Now process each borrower: fetch balances, compute totalDebtUSD, filter by MIN_DEBT_USD
+    let addedCount = 0;
+    let filteredCount = 0;
+    
+    for (const borrowerAddress of uniqueBorrowers) {
+      try {
+        // Add borrower temporarily to registry
+        const borrower = borrowerRegistry.addBorrower(borrowerAddress, BorrowerState.SAFE);
+        
+        // Fetch on-chain balances
+        await updateBorrowerBalancesForSeed(borrowerAddress);
+        
+        // Compute totalDebtUSD using oracle prices
+        const totalDebtUSD = await getTotalDebtUSD(provider, borrower);
+        
+        if (totalDebtUSD < config.minDebtUsd) {
+          // Remove from registry
+          borrowerRegistry.removeBorrower(borrowerAddress);
+          filteredCount++;
+        } else {
+          addedCount++;
+        }
+      } catch (error) {
+        logger.error('Error processing borrower in seed scan', {
+          borrower: borrowerAddress,
+          error
+        });
+        // Remove on error
+        borrowerRegistry.removeBorrower(borrowerAddress);
+      }
+    }
+    
+    logger.info('=== Seed Scan Complete ===', {
+      totalFound: uniqueBorrowers.size,
+      added: addedCount,
+      filtered: filteredCount,
+      minDebtUsd: config.minDebtUsd
+    });
+    
+    // Send Telegram notification (optional)
+    const message = `✅ Seed Scan Complete
+Total Borrowers Found: ${uniqueBorrowers.size}
+Added to Registry: ${addedCount}
+Filtered (below MIN_DEBT_USD): ${filteredCount}
+MIN_DEBT_USD: $${config.minDebtUsd}`;
+    
+    sendTelegram(message).catch(error => {
+      logger.debug('Failed to send Telegram seed completion', { error });
+    });
+    
+    seedScanCompleted = true;
+  } catch (error) {
+    logger.error('Fatal error in seed scan', { error });
+    seedScanCompleted = true; // Mark as completed to avoid retry
+  }
+}
+
+// Helper function to update borrower balances during seed scan
+async function updateBorrowerBalancesForSeed(userAddress: string): Promise<void> {
+  const borrower = borrowerRegistry.getBorrower(userAddress);
+  if (!borrower) {
+    return;
+  }
+  
+  const config = getConfig();
+  const addresses = getAaveAddresses();
+  
+  const poolContract = new ethers.Contract(
+    addresses.pool,
+    AAVE_POOL_ABI,
+    provider
+  );
+  
+  // Fetch collateral balances
+  const collateralBalances = [];
+  for (const asset of config.targetCollateralAssets) {
+    try {
+      const assetAddress = getAssetAddress(asset);
+      const reserveData = await poolContract.getReserveData(assetAddress);
+      const aTokenAddress = reserveData.aTokenAddress;
+      
+      const aTokenContract = new ethers.Contract(aTokenAddress, ERC20_ABI, provider);
+      const balance = await aTokenContract.balanceOf(userAddress);
+      
+      if (balance > 0n) {
+        collateralBalances.push({
+          asset,
+          amount: balance,
+          valueUsd: 0
+        });
+      }
+    } catch (error) {
+      logger.error('Error fetching collateral balance in seed', { asset, error });
+    }
+  }
+  
+  // Fetch debt balances
+  const debtBalances = [];
+  for (const asset of config.targetDebtAssets) {
+    try {
+      const assetAddress = getAssetAddress(asset);
+      const reserveData = await poolContract.getReserveData(assetAddress);
+      const debtTokenAddress = reserveData.variableDebtTokenAddress;
+      
+      const debtTokenContract = new ethers.Contract(debtTokenAddress, ERC20_ABI, provider);
+      const balance = await debtTokenContract.balanceOf(userAddress);
+      
+      if (balance > 0n) {
+        debtBalances.push({
+          asset,
+          amount: balance,
+          valueUsd: 0
+        });
+      }
+    } catch (error) {
+      logger.error('Error fetching debt balance in seed', { asset, error });
+    }
+  }
+  
+  // Update borrower
+  borrower.collateralBalances = collateralBalances;
+  borrower.debtBalances = debtBalances;
+}
 
 // Initialize bot
 async function initialize(): Promise<void> {
@@ -239,6 +444,18 @@ async function prepareLiquidation(borrowerAddress: string): Promise<void> {
     return;
   }
   
+  // Check MIN_DEBT_USD before preparing
+  const totalDebtUSD = await getTotalDebtUSD(provider, borrower);
+  if (totalDebtUSD < config.minDebtUsd) {
+    logger.info('Skipping preparation: debt below MIN_DEBT_USD', {
+      borrower: borrowerAddress,
+      totalDebtUSD: totalDebtUSD.toFixed(2),
+      minDebtUsd: config.minDebtUsd
+    });
+    borrowerRegistry.updateSkipReason(borrowerAddress, 'below_min_debt');
+    return;
+  }
+  
   // Try to acquire lock for this borrower
   if (!borrowerRegistry.tryAcquireLock(borrowerAddress)) {
     logger.debug('Borrower already being processed, skipping preparation', {
@@ -315,6 +532,7 @@ async function prepareLiquidation(borrowerAddress: string): Promise<void> {
       // Store flash result and block number for later use
       borrower.flashResult = flashSimResult;
       borrower.preparedBlockNumber = currentBlock;
+      borrower.lastPreparedBlock = currentBlock;
       
     } else {
       // Use traditional direct liquidation
@@ -349,6 +567,7 @@ async function prepareLiquidation(borrowerAddress: string): Promise<void> {
           
           borrower.cachedTx = cachedTx;
           borrower.preparedBlockNumber = currentBlock;
+          borrower.lastPreparedBlock = currentBlock;
           
           logger.info('Liquidation transaction prepared', {
             borrower: borrowerAddress,
@@ -385,6 +604,18 @@ async function executeLiquidation(borrowerAddress: string): Promise<void> {
     return;
   }
   
+  // Check MIN_DEBT_USD before executing
+  const totalDebtUSD = await getTotalDebtUSD(provider, borrower);
+  if (totalDebtUSD < config.minDebtUsd) {
+    logger.info('Skipping execution: debt below MIN_DEBT_USD', {
+      borrower: borrowerAddress,
+      totalDebtUSD: totalDebtUSD.toFixed(2),
+      minDebtUsd: config.minDebtUsd
+    });
+    borrowerRegistry.updateSkipReason(borrowerAddress, 'below_min_debt');
+    return;
+  }
+  
   // Try to acquire lock for this borrower
   if (!borrowerRegistry.tryAcquireLock(borrowerAddress)) {
     logger.debug('Borrower already being processed, skipping execution', {
@@ -394,6 +625,9 @@ async function executeLiquidation(borrowerAddress: string): Promise<void> {
   }
   
   try {
+    // Track execution attempt
+    borrower.lastExecutionAttemptAt = Date.now();
+    
     // Check price feed policy (fail-closed: Binance OR Pyth must be live)
     const feedPolicy = priceAggregator.canExecuteLiquidation(config.priceStaleMs);
     if (!feedPolicy.allowed) {
@@ -506,6 +740,7 @@ async function executeLiquidation(borrowerAddress: string): Promise<void> {
         minProfit: config.minProfitUsd,
         reason: 'Net profit (after gas) < MIN_PROFIT_USD'
       });
+      borrowerRegistry.updateSkipReason(borrowerAddress, 'profit_floor');
       return;
     }
     
@@ -515,6 +750,7 @@ async function executeLiquidation(borrowerAddress: string): Promise<void> {
         profit: borrower.cachedTx.expectedProfitUsd.toFixed(2),
         minProfit: config.minProfitUsd
       });
+      borrowerRegistry.updateSkipReason(borrowerAddress, 'profit_floor');
       return;
     }
     
@@ -524,6 +760,7 @@ async function executeLiquidation(borrowerAddress: string): Promise<void> {
         gas: borrower.cachedTx.estimatedGasUsd.toFixed(2),
         maxGas: config.maxGasUsd
       });
+      borrowerRegistry.updateSkipReason(borrowerAddress, 'gas_guard');
       return;
     }
     
@@ -666,6 +903,9 @@ async function main(): Promise<void> {
     
     // Initialize
     await initialize();
+    
+    // Run seed scan once (before block loop starts)
+    await seedBorrowersOnce();
     
     // Start block loop
     startBlockLoop();
