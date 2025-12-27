@@ -471,14 +471,22 @@ async function prepareLiquidation(borrowerAddress: string): Promise<void> {
   }
   
   // Check MIN_DEBT_USD before preparing
-  const totalDebtUSD = await getTotalDebtUSD(provider, borrower);
-  if (totalDebtUSD < config.minDebtUsd) {
-    logger.info('Skipping preparation: debt below MIN_DEBT_USD', {
+  try {
+    const totalDebtUSD = await getTotalDebtUSD(provider, borrower);
+    if (totalDebtUSD < config.minDebtUsd) {
+      logger.info('Skipping preparation: debt below MIN_DEBT_USD', {
+        borrower: borrowerAddress,
+        totalDebtUSD: totalDebtUSD.toFixed(2),
+        minDebtUsd: config.minDebtUsd
+      });
+      borrowerRegistry.updateSkipReason(borrowerAddress, 'below_min_debt');
+      return;
+    }
+  } catch (error) {
+    logger.warn('Failed to compute debt for MIN_DEBT_USD check in preparation, skipping', {
       borrower: borrowerAddress,
-      totalDebtUSD: totalDebtUSD.toFixed(2),
-      minDebtUsd: config.minDebtUsd
+      error
     });
-    borrowerRegistry.updateSkipReason(borrowerAddress, 'below_min_debt');
     return;
   }
   
@@ -631,14 +639,22 @@ async function executeLiquidation(borrowerAddress: string): Promise<void> {
   }
   
   // Check MIN_DEBT_USD before executing
-  const totalDebtUSD = await getTotalDebtUSD(provider, borrower);
-  if (totalDebtUSD < config.minDebtUsd) {
-    logger.info('Skipping execution: debt below MIN_DEBT_USD', {
+  try {
+    const totalDebtUSD = await getTotalDebtUSD(provider, borrower);
+    if (totalDebtUSD < config.minDebtUsd) {
+      logger.info('Skipping execution: debt below MIN_DEBT_USD', {
+        borrower: borrowerAddress,
+        totalDebtUSD: totalDebtUSD.toFixed(2),
+        minDebtUsd: config.minDebtUsd
+      });
+      borrowerRegistry.updateSkipReason(borrowerAddress, 'below_min_debt');
+      return;
+    }
+  } catch (error) {
+    logger.warn('Failed to compute debt for MIN_DEBT_USD check in execution, skipping', {
       borrower: borrowerAddress,
-      totalDebtUSD: totalDebtUSD.toFixed(2),
-      minDebtUsd: config.minDebtUsd
+      error
     });
-    borrowerRegistry.updateSkipReason(borrowerAddress, 'below_min_debt');
     return;
   }
   
